@@ -1,0 +1,23 @@
+appId: net.stealthpos.installer
+productName: StealthPOS Connector
+directories:
+  output: dist
+  buildResources: build
+files:
+  - main.js
+  - preload.js
+  - renderer/**/*
+  - package.json
+extraResources:
+  - from: resources/edge.cjs
+    to: edge.cjs
+win:
+  target: nsis
+  requestedExecutionLevel: requireAdministrator
+  artifactName: ${productName} Setup ${version}.${ext}
+nsis:
+  oneClick: false
+  perMachine: true
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true

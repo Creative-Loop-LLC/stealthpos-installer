@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline';" />
+    <title>StealthPOS Connector</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <!-- Top step indicator -->
+    <div class="stepbar" id="stepbar">
+      <div class="stepbar-dot" data-stepdot="1"><span>1</span></div>
+      <div class="stepbar-line"></div>
+      <div class="stepbar-dot" data-stepdot="2"><span>2</span></div>
+      <div class="stepbar-line"></div>
+      <div class="stepbar-dot" data-stepdot="3"><span>3</span></div>
+      <div class="stepbar-line"></div>
+      <div class="stepbar-dot" data-stepdot="4"><span>4</span></div>
+      <div class="stepbar-line"></div>
+      <div class="stepbar-dot" data-stepdot="5"><span>5</span></div>
+      <div class="stepbar-line"></div>
+      <div class="stepbar-dot" data-stepdot="6"><span>6</span></div>
+    </div>
+
+    <main class="stage">
+      <!-- 1. Welcome -->
+      <section class="screen is-active" data-screen="welcome">
+        <div class="hero">
+          <div class="logo">
+            <span class="logo-mark">⬡</span>
+            <span class="logo-word">StealthPOS</span>
+          </div>
+          <h1>Connect your store in 5 minutes</h1>
+          <p class="sub">
+            This wizard installs a small background connector that securely sends your
+            point-of-sale data to StealthPOS. No technical setup required.
+          </p>
+        </div>
+        <div class="actions">
+          <button class="btn btn-primary" data-go="account">Get Started</button>
+        </div>
+      </section>
+
+      <!-- 2. Account -->
+      <section class="screen" data-screen="account">
+        <h2>Let's get you signed in</h2>
+        <p class="sub">Choose how you'd like to continue.</p>
+        <div class="card-grid">
+          <button class="card" data-account="login">
+            <span class="card-icon">🔑</span>
+            <span class="card-title">I have an account</span>
+            <span class="card-desc">Log in and connect this store.</span>
+          </button>
+          <button class="card" data-account="signup">
+            <span class="card-icon">✨</span>
+            <span class="card-title">I'm new — sign up</span>
+            <span class="card-desc">Create your StealthPOS account.</span>
+          </button>
+        </div>
+        <div class="actions actions-split">
+          <button class="btn btn-ghost" data-go="welcome">Back</button>
+        </div>
+      </section>
+
+      <!-- 3a. Login -->
+      <section class="screen" data-screen="login">
+        <h2>Log in</h2>
+        <p class="sub">Use your StealthPOS dashboard credentials.</p>
+        <form id="loginForm" class="form">
+          <label class="field">
+            <span>Email</span>
+            <input type="email" id="loginEmail" autocomplete="username" required />
+          </label>
+          <label class="field">
+            <span>Password</span>
+            <input type="password" id="loginPassword" autocomplete="current-password" required />
+          </label>
+          <div class="inline-error" id="loginError" hidden></div>
+          <div class="store-found" id="loginStoreFound" hidden>
+            <span class="store-found-check">✓</span>
+            <div>
+              <strong id="loginStoreName">Store</strong>
+              <span class="store-found-sub">Ready to connect.</span>
+            </div>
+          </div>
+        </form>
+        <div class="actions actions-split">
+          <button class="btn btn-ghost" data-go="account">Back</button>
+          <button class="btn btn-primary" id="loginSubmit">Log in</button>
+        </div>
+      </section>
+
+      <!-- 3b. Signup -->
+      <section class="screen" data-screen="signup">
+        <h2>Create your account</h2>
+        <p class="sub">Tell us about your business and your first store.</p>
+        <form id="signupForm" class="form form-grid">
+          <label class="field col-2">
+            <span>Business name</span>
+            <input type="text" id="suBusiness" required />
+          </label>
+          <label class="field">
+            <span>Email</span>
+            <input type="email" id="suEmail" autocomplete="email" required />
+          </label>
+          <label class="field">
+            <span>Password</span>
+            <input type="password" id="suPassword" autocomplete="new-password" minlength="8" required />
+          </label>
+          <label class="field col-2">
+            <span>Store name</span>
+            <input type="text" id="suStore" required />
+          </label>
+          <label class="field">
+            <span>City</span>
+            <input type="text" id="suCity" required />
+          </label>
+          <label class="field">
+            <span>State</span>
+            <input type="text" id="suState" maxlength="2" placeholder="TX" required />
+          </label>
+          <div class="inline-error col-2" id="signupError" hidden></div>
+        </form>
+        <div class="actions actions-split">
+          <button class="btn btn-ghost" data-go="account">Back</button>
+          <button class="btn btn-primary" id="signupSubmit">Create account</button>
+        </div>
+      </section>
+
+      <!-- 4. POS Type -->
+      <section class="screen" data-screen="pos">
+        <h2>What point-of-sale do you run?</h2>
+        <p class="sub">This tells the connector which data format to expect.</p>
+        <div class="card-grid card-grid-3">
+          <button class="card card-featured" data-pos="passport">
+            <span class="card-badge">Most common</span>
+            <span class="card-icon">⛽</span>
+            <span class="card-title">Gilbarco Passport</span>
+          </button>
+          <button class="card" data-pos="commander">
+            <span class="card-icon">🖥️</span>
+            <span class="card-title">Verifone Commander</span>
+          </button>
+          <button class="card" data-pos="other">
+            <span class="card-icon">➕</span>
+            <span class="card-title">Other</span>
+          </button>
+        </div>
+        <div class="actions actions-split">
+          <button class="btn btn-ghost" id="posBack">Back</button>
+        </div>
+      </section>
+
+      <!-- 5. Back Office -->
+      <section class="screen" data-screen="backoffice">
+        <h2>Do you use a back office system?</h2>
+        <p class="sub">Such as Modisoft, Petrosoft, or a similar tool.</p>
+        <div class="card-grid">
+          <button class="card" data-mode="mirror">
+            <span class="card-icon">🔁</span>
+            <span class="card-title">Yes — I use one</span>
+            <span class="card-desc">We'll mirror the data it already produces.</span>
+          </button>
+          <button class="card" data-mode="owner">
+            <span class="card-icon">🏪</span>
+            <span class="card-title">No — just my POS</span>
+            <span class="card-desc">We'll read directly from the POS.</span>
+          </button>
+        </div>
+        <div class="actions actions-split">
+          <button class="btn btn-ghost" data-go="pos">Back</button>
+        </div>
+      </section>
+
+      <!-- 6. Folder -->
+      <section class="screen" data-screen="folder">
+        <h2>Locate your POS data folder</h2>
+        <p class="sub">We'll look for the Passport XML export folder automatically.</p>
+
+        <div class="detect" id="detectPending">
+          <div class="spinner"></div>
+          <span>Scanning for the Passport XML folder…</span>
+        </div>
+
+        <div class="detect detect-found" id="detectFound" hidden>
+          <span class="detect-check">✓</span>
+          <div>
+            <strong>Folder found</strong>
+            <code id="folderPath">—</code>
+          </div>
+        </div>
+
+        <div class="detect detect-missing" id="detectMissing" hidden>
+          <span class="detect-warn">!</span>
+          <div>
+            <strong>We couldn't find it automatically</strong>
+            <span class="store-found-sub">Pick the folder manually below.</span>
+          </div>
+        </div>
+
+        <button class="btn btn-secondary" id="browseBtn">Browse…</button>
+
+        <div class="actions actions-split">
+          <button class="btn btn-ghost" data-go="backoffice">Back</button>
+          <button class="btn btn-primary" id="folderContinue" disabled>Install Connector</button>
+        </div>
+      </section>
+
+      <!-- 7. Installing -->
+      <section class="screen" data-screen="installing">
+        <h2>Installing the connector</h2>
+        <p class="sub">Hang tight — this takes about a minute.</p>
+        <ol class="steplist" id="steplist">
+          <li data-instep="1"><span class="step-mark"></span><span class="step-text">Create install folder</span></li>
+          <li data-instep="2"><span class="step-mark"></span><span class="step-text">Download the connector</span></li>
+          <li data-instep="3"><span class="step-mark"></span><span class="step-text">Set up the Windows service manager</span></li>
+          <li data-instep="4"><span class="step-mark"></span><span class="step-text">Install &amp; start the service</span></li>
+          <li data-instep="5"><span class="step-mark"></span><span class="step-text">Confirm data is flowing</span></li>
+        </ol>
+        <pre class="log" id="installLog" aria-live="polite"></pre>
+      </section>
+
+      <!-- 8. Done -->
+      <section class="screen" data-screen="done">
+        <div class="hero">
+          <div class="done-check">✓</div>
+          <h1>You're connected!</h1>
+          <p class="sub">
+            <strong id="doneStoreName">Your store</strong> is now linked to StealthPOS.
+            Data uploads automatically in the background — you can close this window.
+          </p>
+        </div>
+        <div class="actions">
+          <button class="btn btn-primary" id="openDashboard">Open Dashboard</button>
+        </div>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
