@@ -268,7 +268,7 @@ ipcMain.handle("install-edge", async (event, opts) => {
           for (const line of fresh) send(5, "running", line);
           cursor = content.length;
         }
-        if (/uploaded|BOS Edge starting/i.test(content)) {
+        if (/uploaded|Connector starting/i.test(content)) {
           connected = true;
           break;
         }

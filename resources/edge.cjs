@@ -1,5 +1,5 @@
 /**
- * Kroozin BOS Edge — zero-dependency single-file build.
+ * StealthPOS Connector (BOS Edge) — zero-dependency single-file build.
  *
  * Uses only Node built-ins (fs, path, crypto, http/s — fetch is built-in
  * since Node 18). No chokidar, no npm install required. Polls the watch
@@ -8,7 +8,7 @@
  * Required env:
  *   BOS_EDGE_SECRET   shared secret matching the cloud's BOS_EDGE_SECRET
  *   BOS_STORE_ID      integer store ID
- *   BOS_CLOUD_URL     e.g. https://kroozinplus.net
+ *   BOS_CLOUD_URL     e.g. https://stealthpos.net
  *   BOS_WATCH_DIR     absolute path to folder Passport drops XML into
  *
  * Optional env:
@@ -50,7 +50,7 @@ const config = {
 };
 // Work dirs default to a LOCAL folder — never inside the watch dir — so in
 // mirror mode we never write a single byte into the shared POS folder.
-const DATA_DIR = path.join(os.homedir() || os.tmpdir(), ".kroozin-bos-edge");
+const DATA_DIR = path.join(os.homedir() || os.tmpdir(), ".stealthpos-connector");
 config.outboxDir = process.env.BOS_OUTBOX_DIR
   ? path.resolve(process.env.BOS_OUTBOX_DIR)
   : path.join(DATA_DIR, "outbox");
@@ -77,7 +77,7 @@ if (config.mode === "mirror") {
     console.error(
       "Refusing to start: in mirror mode BOS_OUTBOX_DIR and BOS_SEEN_DB must be " +
         "LOCAL paths OUTSIDE BOS_WATCH_DIR, so the Edge never writes to the shared " +
-        "POS folder. Point them at e.g. C:\\KroozinEdge\\outbox and C:\\KroozinEdge\\seen.log.",
+        "POS folder. Point them at e.g. C:\\StealthPOS\\outbox and C:\\StealthPOS\\seen.log.",
     );
     process.exit(1);
   }
@@ -303,7 +303,7 @@ async function retryOutbox() {
 }
 
 async function main() {
-  log("Kroozin BOS Edge starting", {
+  log("StealthPOS Connector starting", {
     mode: config.mode,
     storeId: config.storeId,
     watchDir: config.watchDir,
