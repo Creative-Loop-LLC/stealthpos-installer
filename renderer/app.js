@@ -199,8 +199,10 @@ signupSubmit.addEventListener("click", async () => {
     password:    document.getElementById("suPassword").value,
     storeName:   document.getElementById("suStore").value.trim(),
     phone:       document.getElementById("suPhone").value.trim(),
+    address:     document.getElementById("suAddress").value.trim(),
     city:        document.getElementById("suCity").value.trim(),
     state:       document.getElementById("suState").value.trim(),
+    zip:         document.getElementById("suZip").value.trim(),
     posType:     state.posType || "passport",
     runningModisoft: "no",
   };
@@ -232,6 +234,49 @@ signupSubmit.addEventListener("click", async () => {
   state.storeName = (res.stores[0] && res.stores[0].displayName)  || payload.storeName;
   showScreen("pos");
 });
+
+// --- Signup: address autocomplete (Google Places via the cloud proxy) ------
+const suAddress     = document.getElementById("suAddress");
+const suAddrSuggest = document.getElementById("suAddrSuggest");
+let addrTimer = null;
+
+function hideAddrSuggest() {
+  suAddrSuggest.hidden = true;
+  suAddrSuggest.innerHTML = "";
+}
+
+if (suAddress && window.stealth && window.stealth.addressAutocomplete) {
+  suAddress.addEventListener("input", () => {
+    const q = suAddress.value.trim();
+    clearTimeout(addrTimer);
+    if (q.length < 3) { hideAddrSuggest(); return; }
+    addrTimer = setTimeout(async () => {
+      const res = await window.stealth.addressAutocomplete(q);
+      const list = (res && res.suggestions) || [];
+      if (!list.length) { hideAddrSuggest(); return; }
+      suAddrSuggest.innerHTML = "";
+      for (const s of list.slice(0, 6)) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "addr-suggest-item";
+        btn.textContent = s.description;
+        btn.addEventListener("click", async () => {
+          hideAddrSuggest();
+          const d = await window.stealth.addressDetails(s.placeId);
+          const det = (d && d.details) || {};
+          if (det.address) suAddress.value = det.address;
+          if (det.city)  document.getElementById("suCity").value = det.city;
+          if (det.state) document.getElementById("suState").value = det.state;
+          if (det.zip)   document.getElementById("suZip").value = det.zip;
+        });
+        suAddrSuggest.appendChild(btn);
+      }
+      suAddrSuggest.hidden = false;
+    }, 280);
+  });
+  // Delay hide so a suggestion click registers first.
+  suAddress.addEventListener("blur", () => setTimeout(hideAddrSuggest, 180));
+}
 
 // ---------------------------------------------------------------------------
 // Screen 4: POS type

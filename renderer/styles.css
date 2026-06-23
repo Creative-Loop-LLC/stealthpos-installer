@@ -518,6 +518,47 @@ h2 {
   padding: 2px 0;
 }
 
+/* ---------- Signup hint + address autocomplete ---------- */
+.field span .hint {
+  font-style: normal;
+  font-weight: 500;
+  color: var(--muted);
+  font-size: 12px;
+}
+.addr-field {
+  position: relative;
+}
+.addr-suggest {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  margin-top: 4px;
+  background: #fff;
+  border: 1.5px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+  overflow: hidden;
+  max-height: 196px;
+  overflow-y: auto;
+}
+.addr-suggest-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 10px 14px;
+  font-size: 13.5px;
+  color: var(--ink);
+  background: #fff;
+  border: none;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+  font-family: inherit;
+}
+.addr-suggest-item:last-child { border-bottom: none; }
+.addr-suggest-item:hover { background: var(--primary-soft); }
+
 /* ---------- Detect note + candidate picker ---------- */
 .detect-note {
   display: block;

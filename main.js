@@ -198,6 +198,29 @@ ipcMain.handle("lookup-email", async (_event, { email }) => {
   }
 });
 
+// Address autocomplete (proxied through the cloud so the Google key stays
+// server-side). Returns [] gracefully if the backend has no key configured.
+ipcMain.handle("address-autocomplete", async (_event, { q }) => {
+  try {
+    const { data } = await getJson(
+      `${CLOUD_URL}/api/util/address?q=${encodeURIComponent(q || "")}`
+    );
+    return { suggestions: data.suggestions || [] };
+  } catch {
+    return { suggestions: [] };
+  }
+});
+ipcMain.handle("address-details", async (_event, { placeId }) => {
+  try {
+    const { data } = await getJson(
+      `${CLOUD_URL}/api/util/address?placeId=${encodeURIComponent(placeId || "")}`
+    );
+    return { details: data.details || {} };
+  } catch {
+    return { details: {} };
+  }
+});
+
 // Existing-account login.
 ipcMain.handle("api-login", async (_event, { username, password }) => {
   try {

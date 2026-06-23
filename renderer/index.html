@@ -120,20 +120,21 @@
               <input type="text" id="suBusiness" placeholder="e.g. Kroozin Inc." required />
             </label>
             <label class="field">
-              <span>Email address</span>
+              <span>Email address <em class="hint">(this is your username)</em></span>
               <input type="email" id="suEmail" autocomplete="email" required />
             </label>
             <label class="field">
               <span>Password</span>
               <input type="password" id="suPassword" autocomplete="new-password" minlength="8" required />
             </label>
-            <label class="field">
+            <label class="field col-2">
               <span>Store / location name</span>
               <input type="text" id="suStore" placeholder="e.g. Main Street Shell" required />
             </label>
-            <label class="field">
-              <span>Business phone</span>
-              <input type="tel" id="suPhone" placeholder="(555) 000-0000" />
+            <label class="field col-2 addr-field">
+              <span>Street address</span>
+              <input type="text" id="suAddress" autocomplete="off" placeholder="Start typing your address…" />
+              <div class="addr-suggest" id="suAddrSuggest" hidden></div>
             </label>
             <label class="field">
               <span>City</span>
@@ -143,9 +144,14 @@
               <span>State</span>
               <input type="text" id="suState" maxlength="2" placeholder="TX" required />
             </label>
-            <div class="field-note col-2">
-              Additional details (address, ZIP, logo) can be completed in your dashboard.
-            </div>
+            <label class="field">
+              <span>ZIP</span>
+              <input type="text" id="suZip" maxlength="10" placeholder="77471" />
+            </label>
+            <label class="field">
+              <span>Business phone</span>
+              <input type="tel" id="suPhone" placeholder="(555) 000-0000" />
+            </label>
             <div class="inline-error col-2" id="signupError" hidden></div>
           </form>
         </div>

@@ -8,6 +8,8 @@ contextBridge.exposeInMainWorld("stealth", {
   lookupEmail:     (data)   => ipcRenderer.invoke("lookup-email", data),
   apiLogin:        (creds)  => ipcRenderer.invoke("api-login", creds),
   apiSignup:       (data)   => ipcRenderer.invoke("api-signup", data),
+  addressAutocomplete: (q)       => ipcRenderer.invoke("address-autocomplete", { q }),
+  addressDetails:      (placeId) => ipcRenderer.invoke("address-details", { placeId }),
   installEdge:     (opts)   => ipcRenderer.invoke("install-edge", opts),
   openDashboard:   ()       => ipcRenderer.invoke("open-dashboard"),
   onInstallProgress: (cb)   =>
