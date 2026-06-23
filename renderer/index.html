@@ -203,18 +203,19 @@
       <!-- 6. Folder -->
       <section class="screen" data-screen="folder">
         <h2>Locate your POS data folder</h2>
-        <p class="sub" id="folderSubtitle">We'll scan for the data export folder automatically.</p>
+        <p class="sub" id="folderSubtitle">We'll find your Passport XML folder automatically — on this PC or on your network.</p>
 
         <div class="detect" id="detectPending" hidden>
           <div class="spinner"></div>
-          <span>Scanning…</span>
+          <span id="detectPendingText">Scanning…</span>
         </div>
 
         <div class="detect detect-found" id="detectFound" hidden>
           <span class="detect-check">✓</span>
           <div>
-            <strong>Folder found</strong>
+            <strong id="detectFoundTitle">Folder found</strong>
             <code id="folderPath">—</code>
+            <span class="detect-note" id="detectNote" hidden></span>
           </div>
         </div>
 
@@ -222,13 +223,19 @@
           <span class="detect-warn">!</span>
           <div>
             <strong>We couldn't find it automatically</strong>
-            <span class="store-found-sub">Pick the folder manually below.</span>
+            <span class="store-found-sub">Pick the folder manually below, or try again.</span>
           </div>
+        </div>
+
+        <!-- Ranked alternatives when more than one location is found -->
+        <div class="candidates" id="detectCandidates" hidden>
+          <span class="candidates-label">Other locations we found:</span>
+          <div id="candidateList"></div>
         </div>
 
         <div class="folder-actions">
           <button class="btn btn-secondary" id="browseBtn">Browse…</button>
-          <button class="btn btn-ghost-sm" id="retryDetectBtn" hidden>Try again</button>
+          <button class="btn btn-ghost-sm" id="retryDetectBtn" hidden>Scan again</button>
         </div>
 
         <div class="actions actions-split">

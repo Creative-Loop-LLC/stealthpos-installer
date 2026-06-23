@@ -265,55 +265,119 @@ document.querySelectorAll("[data-mode]").forEach((card) => {
 });
 
 // ---------------------------------------------------------------------------
-// Screen 6: folder
+// Screen 6: folder (smart, network-aware detection)
 // ---------------------------------------------------------------------------
-const detectPending  = document.getElementById("detectPending");
-const detectFound    = document.getElementById("detectFound");
-const detectMissing  = document.getElementById("detectMissing");
-const folderPath     = document.getElementById("folderPath");
-const folderContinue = document.getElementById("folderContinue");
-const retryDetectBtn = document.getElementById("retryDetectBtn");
-const folderSubtitle = document.getElementById("folderSubtitle");
+const detectPending     = document.getElementById("detectPending");
+const detectPendingText = document.getElementById("detectPendingText");
+const detectFound       = document.getElementById("detectFound");
+const detectFoundTitle  = document.getElementById("detectFoundTitle");
+const detectNote        = document.getElementById("detectNote");
+const detectMissing     = document.getElementById("detectMissing");
+const detectCandidates  = document.getElementById("detectCandidates");
+const candidateList     = document.getElementById("candidateList");
+const folderPath        = document.getElementById("folderPath");
+const folderContinue    = document.getElementById("folderContinue");
+const retryDetectBtn    = document.getElementById("retryDetectBtn");
+const folderSubtitle    = document.getElementById("folderSubtitle");
+
+const isUncPath = (p) => /^\\\\/.test(p || "");
+
+// Live progress lines streamed from the main-process scan.
+if (window.stealth && window.stealth.onDetectProgress) {
+  window.stealth.onDetectProgress((msg) => {
+    detectPendingText.textContent = msg;
+  });
+}
 
 function resetFolderUI() {
   detectPending.hidden = true;
   detectFound.hidden   = true;
   detectMissing.hidden = true;
+  detectCandidates.hidden = true;
   retryDetectBtn.hidden = true;
+  detectNote.hidden = true;
   folderContinue.disabled = true;
   folderPath.textContent = "—";
+  candidateList.innerHTML = "";
 }
 
-function setWatchDir(p) {
+// Apply a chosen watch dir + optional metadata.
+function setWatchDir(p, meta) {
   if (!p) return; // guard against empty path enabling the button
+  meta = meta || {};
   state.watchDir = p;
   folderPath.textContent = p;
+
+  // A network share can only be read in MIRROR mode — owner mode MOVES files
+  // and would starve a back-office system like Modisoft (and the connector
+  // refuses owner mode on a UNC path). Enforce it automatically.
+  if (meta.isNetwork || isUncPath(p)) {
+    state.mode = "mirror";
+  } else if (meta.mode && !state.mode) {
+    state.mode = meta.mode;
+  }
+
+  if (meta.note) {
+    detectNote.textContent =
+      meta.note + ((meta.isNetwork || isUncPath(p)) ? " · network share · mirror mode" : "");
+    detectNote.hidden = false;
+  } else {
+    detectNote.hidden = true;
+  }
+
   detectPending.hidden = true;
   detectMissing.hidden = true;
   detectFound.hidden   = false;
-  retryDetectBtn.hidden = true;
+  retryDetectBtn.hidden = false; // allow a re-scan even after a hit
   folderContinue.disabled = false;
+}
+
+// Render the ranked alternatives (everything except the current pick).
+function renderCandidates(candidates, chosenPath) {
+  candidateList.innerHTML = "";
+  const others = (candidates || []).filter((c) => c.path !== chosenPath);
+  if (others.length === 0) { detectCandidates.hidden = true; return; }
+  for (const c of others) {
+    const btn = document.createElement("button");
+    btn.className = "candidate";
+    const code = document.createElement("code");
+    code.textContent = c.path;
+    const note = document.createElement("span");
+    note.textContent = c.note || "";
+    btn.appendChild(code);
+    btn.appendChild(note);
+    btn.addEventListener("click", () => {
+      detectFoundTitle.textContent = "Folder selected";
+      setWatchDir(c.path, c);
+      renderCandidates(candidates, c.path);
+    });
+    candidateList.appendChild(btn);
+  }
+  detectCandidates.hidden = false;
 }
 
 async function runDetect() {
   resetFolderUI();
   detectPending.hidden = false;
+  detectPendingText.textContent = "Scanning…";
 
-  // Update subtitle to match the chosen POS type
-  folderSubtitle.textContent =
-    POS_SUBTITLE[state.posType] || POS_SUBTITLE.other;
+  folderSubtitle.textContent = POS_SUBTITLE[state.posType] || POS_SUBTITLE.other;
 
-  // If login already returned a posSharePath, use it directly
+  // If login already returned a posSharePath, trust it.
   if (state.watchDir) {
-    setWatchDir(state.watchDir);
+    detectFoundTitle.textContent = "Folder found";
+    setWatchDir(state.watchDir, { note: "From your account", isNetwork: isUncPath(state.watchDir) });
     return;
   }
 
   const res = await window.stealth.detectFolder();
   detectPending.hidden = true;
 
-  if (res.found) {
-    setWatchDir(res.path);
+  if (res && res.found) {
+    detectFoundTitle.textContent = "Folder found";
+    const best = (res.candidates && res.candidates[0]) || { mode: res.mode, isNetwork: res.isNetwork };
+    setWatchDir(res.path, best);
+    renderCandidates(res.candidates, res.path);
   } else {
     detectMissing.hidden  = false;
     retryDetectBtn.hidden = false;
@@ -324,11 +388,17 @@ function onFolderScreenEnter() {
   runDetect();
 }
 
-retryDetectBtn.addEventListener("click", () => runDetect());
+retryDetectBtn.addEventListener("click", () => {
+  state.watchDir = ""; // force a fresh scan
+  runDetect();
+});
 
 document.getElementById("browseBtn").addEventListener("click", async () => {
   const res = await window.stealth.browseFolder();
-  if (res.path) setWatchDir(res.path);
+  if (res.path) {
+    detectFoundTitle.textContent = "Folder selected";
+    setWatchDir(res.path, { note: "Chosen manually", isNetwork: isUncPath(res.path) });
+  }
 });
 
 folderContinue.addEventListener("click", () => {
@@ -356,15 +426,17 @@ function appendLog(line) {
   installLog.scrollTop = installLog.scrollHeight;
 }
 
-window.stealth.onInstallProgress((d) => {
-  if (d.step >= 1 && d.step <= 6) setStep(d.step, d.status);
-  if (d.status === "error") {
-    setStep(d.step || 1, "error");
-    appendLog("ERROR: " + d.log);
-  } else if (d.log) {
-    appendLog(d.log);
-  }
-});
+if (window.stealth && window.stealth.onInstallProgress) {
+  window.stealth.onInstallProgress((d) => {
+    if (d.step >= 1 && d.step <= 6) setStep(d.step, d.status);
+    if (d.status === "error") {
+      setStep(d.step || 1, "error");
+      appendLog("ERROR: " + d.log);
+    } else if (d.log) {
+      appendLog(d.log);
+    }
+  });
+}
 
 async function startInstall() {
   if (installStarted) return;

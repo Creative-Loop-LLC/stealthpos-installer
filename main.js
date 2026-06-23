@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
 const fs = require("fs");
 const path = require("path");
 const { execFileSync, spawnSync } = require("child_process");
+const { smartDetect } = require("./detect.cjs");
 
 const CLOUD_URL = "https://stealthpos.net";
 const INSTALL_DIR = "C:\\StealthPOS";
@@ -122,26 +123,6 @@ function localExists(p) {
   }
 }
 
-// Check if a path (especially UNC/network) exists with a hard timeout.
-// fs.existsSync on unresolvable UNC paths blocks the Node event loop
-// indefinitely on Windows, so we spawn a PowerShell child with a timeout.
-function networkExists(p, timeoutMs = 3000) {
-  try {
-    const r = spawnSync(
-      "powershell.exe",
-      [
-        "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-        "-Command",
-        `(Test-Path '${p.replace(/'/g, "''")}').ToString()`,
-      ],
-      { timeout: timeoutMs, windowsHide: true, encoding: "utf8" }
-    );
-    return r.status === 0 && r.stdout.trim() === "True";
-  } catch {
-    return false;
-  }
-}
-
 // Locate node.exe — tries PATH first, then common install directories.
 function findNodeExe() {
   // where.exe searches PATH
@@ -172,41 +153,20 @@ function findNodeExe() {
 // IPC handlers
 // ---------------------------------------------------------------------------
 
-// Scan known Passport XML locations and return the first that exists.
-// Local paths are checked with fs.existsSync (fast); UNC/network paths use
-// a PowerShell child process with a 3-second timeout so the scan never hangs.
-ipcMain.handle("detect-folder", async () => {
-  const localCandidates = [
-    "C:\\Passport\\XMLGateway\\BOOutbox",
-    "C:\\Program Files\\Passport\\XMLGateway\\BOOutbox",
-    "C:\\Program Files (x86)\\Passport\\XMLGateway\\BOOutbox",
-    "C:\\Passport\\XMLGateway\\Processed",
-    "C:\\Gilbarco\\Passport\\XMLGateway\\BOOutbox",
-    "D:\\Passport\\XMLGateway\\BOOutbox",
-    "D:\\Program Files\\Passport\\XMLGateway\\BOOutbox",
-  ];
-
-  // Verifone Commander default share paths
-  const localVerifone = [
-    "C:\\Commander\\Export",
-    "C:\\Program Files\\Verifone\\Commander\\Export",
-  ];
-
-  // Network / UNC paths — checked last with a strict timeout
-  const networkCandidates = [
-    "\\\\PassportServer\\XMLGateway\\BOOutbox",
-    "\\\\localhost\\XMLGateway\\BOOutbox",
-  ];
-
-  for (const p of [...localCandidates, ...localVerifone]) {
-    if (localExists(p)) return { found: true, path: p };
+// Smart, network-aware discovery of the POS XML folder (see detect.cjs).
+// Streams progress lines to the renderer ("Scanning local drives…",
+// "Searching the network…") and returns the best match plus ranked
+// alternatives and a suggested back-office mode. Time-bounded end to end.
+ipcMain.handle("detect-folder", async (event) => {
+  const onProgress = (msg) => {
+    try { event.sender.send("detect-progress", msg); } catch { /* window gone */ }
+  };
+  try {
+    const result = await smartDetect({ onProgress });
+    return result;
+  } catch (err) {
+    return { found: false, path: "", candidates: [], mode: "mirror", error: String(err) };
   }
-
-  for (const p of networkCandidates) {
-    if (networkExists(p, 3000)) return { found: true, path: p };
-  }
-
-  return { found: false, path: "" };
 });
 
 // Manual folder picker fallback.

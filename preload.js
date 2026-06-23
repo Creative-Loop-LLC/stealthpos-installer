@@ -2,6 +2,8 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("stealth", {
   detectFolder:    ()       => ipcRenderer.invoke("detect-folder"),
+  onDetectProgress: (cb)    =>
+    ipcRenderer.on("detect-progress", (_event, msg) => cb(msg)),
   browseFolder:    ()       => ipcRenderer.invoke("browse-folder"),
   lookupEmail:     (data)   => ipcRenderer.invoke("lookup-email", data),
   apiLogin:        (creds)  => ipcRenderer.invoke("api-login", creds),
