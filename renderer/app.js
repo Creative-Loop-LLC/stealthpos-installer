@@ -1,5 +1,5 @@
 // StealthPOS Connector — wizard renderer logic.
-// No framework: screens are <section data-screen> toggled with .is-active.
+// Screens are <section data-screen> toggled with .is-active.
 
 const state = {
   accountType: "", // "login" | "signup"
@@ -7,30 +7,28 @@ const state = {
   secret: "",
   storeId: "",
   storeName: "",
-  posType: "",
+  posType: "",   // set on POS screen — "passport" | "commander" | "other"
   mode: "",
   watchDir: "",
 };
 
 // Which step-indicator dot (1-6) each screen maps to.
 const SCREEN_STEP = {
-  welcome: 1,
-  account: 2,
-  login: 3,
-  signup: 3,
-  pos: 4,
+  welcome:    1,
+  account:    2,
+  login:      3,
+  signup:     3,
+  pos:        4,
   backoffice: 5,
-  folder: 6,
+  folder:     6,
   installing: 6,
-  done: 6,
+  done:       6,
 };
 
 const screens = {};
 document.querySelectorAll("[data-screen]").forEach((el) => {
   screens[el.dataset.screen] = el;
 });
-
-let detectRan = false;
 
 function showScreen(name) {
   Object.values(screens).forEach((el) => el.classList.remove("is-active"));
@@ -39,13 +37,8 @@ function showScreen(name) {
   el.classList.add("is-active");
   updateStepbar(SCREEN_STEP[name] || 1, name === "done");
 
-  if (name === "folder" && !detectRan) {
-    detectRan = true;
-    runDetect();
-  }
-  if (name === "installing") {
-    startInstall();
-  }
+  if (name === "folder") onFolderScreenEnter();
+  if (name === "installing") startInstall();
 }
 
 function updateStepbar(active, allDone) {
@@ -56,104 +49,166 @@ function updateStepbar(active, allDone) {
   });
 }
 
-// --- Generic "Back / go to screen" buttons ---------------------------------
+// --- Generic "go to screen" buttons ----------------------------------------
 document.querySelectorAll("[data-go]").forEach((btn) => {
   btn.addEventListener("click", () => showScreen(btn.dataset.go));
 });
 
-// --- Screen 2: account choice ----------------------------------------------
+// --- Screen 2: account choice -----------------------------------------------
 document.querySelectorAll("[data-account]").forEach((card) => {
   card.addEventListener("click", () => {
     state.accountType = card.dataset.account;
-    showScreen(card.dataset.account); // "login" or "signup"
+    showScreen(card.dataset.account);
   });
 });
 
-// --- Screen 3a: login ------------------------------------------------------
-const loginSubmit = document.getElementById("loginSubmit");
-const loginError = document.getElementById("loginError");
-const loginStoreFound = document.getElementById("loginStoreFound");
-let loggedIn = false;
+// ---------------------------------------------------------------------------
+// Screen 3a: login — two-step flow
+// Step 1: enter email → lookup → show step 2
+// Step 2: enter password → sign in
+// ---------------------------------------------------------------------------
+const loginStep1       = document.getElementById("loginStep1");
+const loginStep2       = document.getElementById("loginStep2");
+const loginEmailInput  = document.getElementById("loginEmail");
+const loginEmailPill   = document.getElementById("loginEmailPill");
+const loginEmailError  = document.getElementById("loginEmailError");
+const loginPasswordInput = document.getElementById("loginPassword");
+const loginPasswordError = document.getElementById("loginPasswordError");
+const loginStoreFound  = document.getElementById("loginStoreFound");
+const loginNextBtn     = document.getElementById("loginNextBtn");
+const loginSubmit      = document.getElementById("loginSubmit");
+const loginChangeEmail = document.getElementById("loginChangeEmailBtn");
 
-function showError(el, message) {
-  el.textContent = message;
-  el.hidden = false;
-}
-function clearError(el) {
-  el.hidden = true;
-  el.textContent = "";
+let loginAuthed = false; // true after successful API login
+
+function showLoginStep(n) {
+  loginStep1.hidden = n !== 1;
+  loginStep2.hidden = n !== 2;
 }
 
+function showErr(el, msg)  { el.textContent = msg; el.hidden = false; }
+function clearErr(el)       { el.hidden = true; el.textContent = ""; }
+
+// Whenever the login screen becomes active, reset to step 1 unless already authed.
+function resetLogin() {
+  if (loginAuthed) return;
+  showLoginStep(1);
+  clearErr(loginEmailError);
+  clearErr(loginPasswordError);
+  loginStoreFound.hidden = true;
+  loginSubmit.textContent = "Sign in";
+  loginSubmit.disabled = false;
+}
+
+// Step 1 → Continue
+loginNextBtn.addEventListener("click", async () => {
+  clearErr(loginEmailError);
+  const email = loginEmailInput.value.trim();
+  if (!email || !loginEmailInput.validity.valid) {
+    showErr(loginEmailError, "Please enter a valid email address.");
+    return;
+  }
+
+  loginNextBtn.disabled = true;
+  loginNextBtn.textContent = "Checking…";
+
+  // Try the email-lookup endpoint; if it doesn't exist yet, proceed anyway.
+  const lookup = await window.stealth.lookupEmail({ email });
+  loginNextBtn.disabled = false;
+  loginNextBtn.textContent = "Continue";
+
+  if (!lookup.degraded && lookup.found === false) {
+    showErr(loginEmailError, "No account found with that email. Check for typos or sign up instead.");
+    return;
+  }
+
+  // Show step 2
+  loginEmailPill.textContent = email;
+  loginPasswordInput.value = "";
+  clearErr(loginPasswordError);
+  loginStoreFound.hidden = true;
+  loginSubmit.textContent = "Sign in";
+  loginSubmit.disabled = false;
+  loginAuthed = false;
+  showLoginStep(2);
+  setTimeout(() => loginPasswordInput.focus(), 50);
+});
+
+// Step 2 → back to step 1
+loginChangeEmail.addEventListener("click", () => {
+  loginAuthed = false;
+  showLoginStep(1);
+  setTimeout(() => loginEmailInput.focus(), 50);
+});
+
+// Forgot password link — opens dashboard in browser
+document.getElementById("forgotPasswordLink").addEventListener("click", (e) => {
+  e.preventDefault();
+  window.stealth.openDashboard(); // opens stealthpos.net/admin; backend handles /forgot-password redirect
+});
+
+// Step 2 → Sign in
 loginSubmit.addEventListener("click", async () => {
-  if (loggedIn) {
-    showScreen("pos");
-    return;
-  }
-  clearError(loginError);
-  const email = document.getElementById("loginEmail").value.trim();
-  const password = document.getElementById("loginPassword").value;
-  if (!email || !password) {
-    showError(loginError, "Enter your email and password.");
-    return;
-  }
+  if (loginAuthed) { showScreen("pos"); return; }
+
+  clearErr(loginPasswordError);
+  const email    = loginEmailInput.value.trim();
+  const password = loginPasswordInput.value;
+  if (!password) { showErr(loginPasswordError, "Please enter your password."); return; }
 
   loginSubmit.disabled = true;
-  loginSubmit.textContent = "Logging in…";
+  loginSubmit.textContent = "Signing in…";
+
   const res = await window.stealth.apiLogin({ username: email, password });
   loginSubmit.disabled = false;
 
   if (!res.ok) {
-    loginSubmit.textContent = "Log in";
-    showError(loginError, res.message || "Login failed.");
+    loginSubmit.textContent = "Sign in";
+    showErr(loginPasswordError, res.message || "Incorrect password. Please try again.");
     return;
   }
 
-  state.email = email;
-  state.secret = res.edgeSecret;
-  state.storeId = (res.session && res.session.storeId) || "";
-  state.storeName = (res.session && res.session.storeName) || "Your store";
-  state.watchDir = (res.session && res.session.posSharePath) || "";
+  state.email     = email;
+  state.secret    = res.edgeSecret;
+  state.storeId   = (res.session && res.session.storeId)    || "";
+  state.storeName = (res.session && res.session.storeName)  || "Your store";
+  state.watchDir  = (res.session && res.session.posSharePath) || "";
 
   document.getElementById("loginStoreName").textContent = state.storeName;
   loginStoreFound.hidden = false;
-  loginSubmit.textContent = "Continue";
-  loggedIn = true;
+  loginSubmit.textContent = "Continue →";
+  loginAuthed = true;
 });
 
-// --- Screen 3b: signup -----------------------------------------------------
+// ---------------------------------------------------------------------------
+// Screen 3b: signup
+// ---------------------------------------------------------------------------
 const signupSubmit = document.getElementById("signupSubmit");
-const signupError = document.getElementById("signupError");
+const signupError  = document.getElementById("signupError");
 
 signupSubmit.addEventListener("click", async () => {
-  clearError(signupError);
+  clearErr(signupError);
+
   const payload = {
-    legalName: document.getElementById("suBusiness").value.trim(),
+    legalName:   document.getElementById("suBusiness").value.trim(),
     displayName: document.getElementById("suBusiness").value.trim(),
-    email: document.getElementById("suEmail").value.trim(),
-    password: document.getElementById("suPassword").value,
-    storeName: document.getElementById("suStore").value.trim(),
-    city: document.getElementById("suCity").value.trim(),
-    state: document.getElementById("suState").value.trim(),
-    // Backend onboard/start validates posType ∈ {passport,commander,radiant,other}.
-    // POS is chosen on a later screen; default the signup record to the most common.
-    posType: "passport",
+    email:       document.getElementById("suEmail").value.trim(),
+    password:    document.getElementById("suPassword").value,
+    storeName:   document.getElementById("suStore").value.trim(),
+    phone:       document.getElementById("suPhone").value.trim(),
+    city:        document.getElementById("suCity").value.trim(),
+    state:       document.getElementById("suState").value.trim(),
+    posType:     state.posType || "passport",
     runningModisoft: "no",
   };
 
-  if (payload.password && payload.password.length < 8) {
-    showError(signupError, "Password must be at least 8 characters.");
+  if (!payload.legalName || !payload.email || !payload.password ||
+      !payload.storeName  || !payload.city  || !payload.state) {
+    showErr(signupError, "Please fill in all required fields.");
     return;
   }
-
-  if (
-    !payload.legalName ||
-    !payload.email ||
-    !payload.password ||
-    !payload.storeName ||
-    !payload.city ||
-    !payload.state
-  ) {
-    showError(signupError, "Please fill in every field.");
+  if (payload.password.length < 8) {
+    showErr(signupError, "Password must be at least 8 characters.");
     return;
   }
 
@@ -164,18 +219,26 @@ signupSubmit.addEventListener("click", async () => {
   signupSubmit.textContent = "Create account";
 
   if (!res.ok) {
-    showError(signupError, res.message || "Could not create your account.");
+    showErr(signupError, res.message || "Could not create your account.");
     return;
   }
 
-  state.email = payload.email;
-  state.secret = res.bosEdgeSecret;
-  state.storeId = (res.stores[0] && res.stores[0].id) || "";
-  state.storeName = (res.stores[0] && res.stores[0].displayName) || payload.storeName;
+  state.email     = payload.email;
+  state.secret    = res.bosEdgeSecret;
+  state.storeId   = (res.stores[0] && res.stores[0].id)           || "";
+  state.storeName = (res.stores[0] && res.stores[0].displayName)  || payload.storeName;
   showScreen("pos");
 });
 
-// --- Screen 4: POS type ----------------------------------------------------
+// ---------------------------------------------------------------------------
+// Screen 4: POS type
+// ---------------------------------------------------------------------------
+const POS_SUBTITLE = {
+  passport:  "We'll scan for the Gilbarco Passport XML export folder automatically.",
+  commander: "We'll scan for the Verifone Commander export folder automatically.",
+  other:     "We'll scan for known POS data folders, or you can pick one manually.",
+};
+
 document.querySelectorAll("[data-pos]").forEach((card) => {
   card.addEventListener("click", () => {
     document.querySelectorAll("[data-pos]").forEach((c) => c.classList.remove("is-selected"));
@@ -184,11 +247,14 @@ document.querySelectorAll("[data-pos]").forEach((card) => {
     setTimeout(() => showScreen("backoffice"), 180);
   });
 });
+
 document.getElementById("posBack").addEventListener("click", () => {
   showScreen(state.accountType === "signup" ? "signup" : "login");
 });
 
-// --- Screen 5: back office mode --------------------------------------------
+// ---------------------------------------------------------------------------
+// Screen 5: back office mode
+// ---------------------------------------------------------------------------
 document.querySelectorAll("[data-mode]").forEach((card) => {
   card.addEventListener("click", () => {
     document.querySelectorAll("[data-mode]").forEach((c) => c.classList.remove("is-selected"));
@@ -198,43 +264,81 @@ document.querySelectorAll("[data-mode]").forEach((card) => {
   });
 });
 
-// --- Screen 6: folder ------------------------------------------------------
-const detectPending = document.getElementById("detectPending");
-const detectFound = document.getElementById("detectFound");
-const detectMissing = document.getElementById("detectMissing");
-const folderPath = document.getElementById("folderPath");
+// ---------------------------------------------------------------------------
+// Screen 6: folder
+// ---------------------------------------------------------------------------
+const detectPending  = document.getElementById("detectPending");
+const detectFound    = document.getElementById("detectFound");
+const detectMissing  = document.getElementById("detectMissing");
+const folderPath     = document.getElementById("folderPath");
 const folderContinue = document.getElementById("folderContinue");
+const retryDetectBtn = document.getElementById("retryDetectBtn");
+const folderSubtitle = document.getElementById("folderSubtitle");
+
+function resetFolderUI() {
+  detectPending.hidden = true;
+  detectFound.hidden   = true;
+  detectMissing.hidden = true;
+  retryDetectBtn.hidden = true;
+  folderContinue.disabled = true;
+  folderPath.textContent = "—";
+}
 
 function setWatchDir(p) {
+  if (!p) return; // guard against empty path enabling the button
   state.watchDir = p;
   folderPath.textContent = p;
   detectPending.hidden = true;
   detectMissing.hidden = true;
-  detectFound.hidden = false;
+  detectFound.hidden   = false;
+  retryDetectBtn.hidden = true;
   folderContinue.disabled = false;
 }
 
 async function runDetect() {
+  resetFolderUI();
   detectPending.hidden = false;
-  detectFound.hidden = true;
-  detectMissing.hidden = true;
+
+  // Update subtitle to match the chosen POS type
+  folderSubtitle.textContent =
+    POS_SUBTITLE[state.posType] || POS_SUBTITLE.other;
+
+  // If login already returned a posSharePath, use it directly
+  if (state.watchDir) {
+    setWatchDir(state.watchDir);
+    return;
+  }
+
   const res = await window.stealth.detectFolder();
   detectPending.hidden = true;
+
   if (res.found) {
     setWatchDir(res.path);
   } else {
-    detectMissing.hidden = false;
+    detectMissing.hidden  = false;
+    retryDetectBtn.hidden = false;
   }
 }
+
+function onFolderScreenEnter() {
+  runDetect();
+}
+
+retryDetectBtn.addEventListener("click", () => runDetect());
 
 document.getElementById("browseBtn").addEventListener("click", async () => {
   const res = await window.stealth.browseFolder();
   if (res.path) setWatchDir(res.path);
 });
 
-folderContinue.addEventListener("click", () => showScreen("installing"));
+folderContinue.addEventListener("click", () => {
+  if (!state.watchDir) return; // should never happen given the disabled state
+  showScreen("installing");
+});
 
-// --- Screen 7: installing --------------------------------------------------
+// ---------------------------------------------------------------------------
+// Screen 7: installing
+// ---------------------------------------------------------------------------
 const installLog = document.getElementById("installLog");
 let installStarted = false;
 
@@ -243,8 +347,8 @@ function setStep(step, status) {
   if (!li) return;
   li.classList.remove("is-running", "is-done", "is-error");
   if (status === "running") li.classList.add("is-running");
-  if (status === "done") li.classList.add("is-done");
-  if (status === "error") li.classList.add("is-error");
+  if (status === "done")    li.classList.add("is-done");
+  if (status === "error")   li.classList.add("is-error");
 }
 
 function appendLog(line) {
@@ -253,7 +357,7 @@ function appendLog(line) {
 }
 
 window.stealth.onInstallProgress((d) => {
-  if (d.step >= 1 && d.step <= 5) setStep(d.step, d.status);
+  if (d.step >= 1 && d.step <= 6) setStep(d.step, d.status);
   if (d.status === "error") {
     setStep(d.step || 1, "error");
     appendLog("ERROR: " + d.log);
@@ -266,10 +370,10 @@ async function startInstall() {
   if (installStarted) return;
   installStarted = true;
   const res = await window.stealth.installEdge({
-    secret: state.secret,
-    storeId: state.storeId,
+    secret:   state.secret,
+    storeId:  state.storeId,
     watchDir: state.watchDir,
-    mode: state.mode,
+    mode:     state.mode,
     cloudUrl: "https://stealthpos.net",
   });
   if (res.ok) {
@@ -281,10 +385,13 @@ async function startInstall() {
   }
 }
 
-// --- Screen 8: done --------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Screen 8: done
+// ---------------------------------------------------------------------------
 document.getElementById("openDashboard").addEventListener("click", () => {
   window.stealth.openDashboard();
 });
 
-// Boot.
+// Boot — reset login step on initial load
+showLoginStep(1);
 showScreen("welcome");

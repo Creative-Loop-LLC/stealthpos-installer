@@ -1,12 +1,11 @@
 const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
 const fs = require("fs");
 const path = require("path");
-const { execFileSync } = require("child_process");
+const { execFileSync, spawnSync } = require("child_process");
 
 const CLOUD_URL = "https://stealthpos.net";
 const INSTALL_DIR = "C:\\StealthPOS";
 const SERVICE_NAME = "StealthPOSConnector";
-const NSSM_URL = "https://nssm.cc/release/nssm-2.24.zip";
 
 // The connector (edge.cjs) ships bundled inside this installer — see the
 // extraResources entry in electron-builder.yml. No external repo dependency.
@@ -16,12 +15,20 @@ function bundledEdgePath() {
     : path.join(__dirname, "resources", "edge.cjs");
 }
 
+// nssm.exe ships bundled alongside edge.cjs so we never hit the network during
+// install. Add nssm-2.24/win64/nssm.exe to extraResources in electron-builder.yml.
+function bundledNssmPath() {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, "nssm.exe")
+    : path.join(__dirname, "resources", "nssm.exe");
+}
+
 let mainWindow = null;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 640,
-    height: 540,
+    height: 580,
     resizable: false,
     fullscreenable: false,
     maximizable: false,
@@ -70,8 +77,18 @@ async function postJson(url, body) {
   return { res, data };
 }
 
+async function getJson(url) {
+  const res = await fetch(url);
+  let data = {};
+  try {
+    data = await res.json();
+  } catch {
+    data = {};
+  }
+  return { res, data };
+}
+
 function powershell(command) {
-  // Run a PowerShell command synchronously, throwing on a non-zero exit.
   return execFileSync(
     "powershell.exe",
     ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command],
@@ -80,7 +97,6 @@ function powershell(command) {
 }
 
 function nssm(args) {
-  // Invoke the bundled nssm.exe; returns stdout, throws on failure.
   return execFileSync(path.join(INSTALL_DIR, "nssm.exe"), args, {
     windowsHide: true,
     encoding: "utf8",
@@ -88,7 +104,6 @@ function nssm(args) {
 }
 
 function nssmQuiet(args) {
-  // Same as nssm() but swallows errors (used for best-effort stop/remove).
   try {
     nssm(args);
   } catch {
@@ -98,37 +113,129 @@ function nssmQuiet(args) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Check if a local filesystem path exists. Fast — safe to call synchronously.
+function localExists(p) {
+  try {
+    return fs.existsSync(p);
+  } catch {
+    return false;
+  }
+}
+
+// Check if a path (especially UNC/network) exists with a hard timeout.
+// fs.existsSync on unresolvable UNC paths blocks the Node event loop
+// indefinitely on Windows, so we spawn a PowerShell child with a timeout.
+function networkExists(p, timeoutMs = 3000) {
+  try {
+    const r = spawnSync(
+      "powershell.exe",
+      [
+        "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        "-Command",
+        `(Test-Path '${p.replace(/'/g, "''")}').ToString()`,
+      ],
+      { timeout: timeoutMs, windowsHide: true, encoding: "utf8" }
+    );
+    return r.status === 0 && r.stdout.trim() === "True";
+  } catch {
+    return false;
+  }
+}
+
+// Locate node.exe — tries PATH first, then common install directories.
+function findNodeExe() {
+  // where.exe searches PATH
+  try {
+    const r = spawnSync("where.exe", ["node.exe"], {
+      windowsHide: true, encoding: "utf8", timeout: 3000,
+    });
+    if (r.status === 0 && r.stdout.trim()) {
+      return r.stdout.trim().split(/\r?\n/)[0].trim();
+    }
+  } catch {
+    /* not on PATH */
+  }
+
+  const candidates = [
+    "C:\\Program Files\\nodejs\\node.exe",
+    "C:\\Program Files (x86)\\nodejs\\node.exe",
+    path.join(process.env.LOCALAPPDATA || "", "Programs\\nodejs\\node.exe"),
+    path.join(process.env.APPDATA || "", "nvm\\current\\node.exe"),
+  ];
+  for (const p of candidates) {
+    if (localExists(p)) return p;
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // IPC handlers
 // ---------------------------------------------------------------------------
 
-// Scan known Passport XML locations, return the first that exists.
-ipcMain.handle("detect-folder", () => {
-  const candidates = [
+// Scan known Passport XML locations and return the first that exists.
+// Local paths are checked with fs.existsSync (fast); UNC/network paths use
+// a PowerShell child process with a 3-second timeout so the scan never hangs.
+ipcMain.handle("detect-folder", async () => {
+  const localCandidates = [
     "C:\\Passport\\XMLGateway\\BOOutbox",
     "C:\\Program Files\\Passport\\XMLGateway\\BOOutbox",
     "C:\\Program Files (x86)\\Passport\\XMLGateway\\BOOutbox",
     "C:\\Passport\\XMLGateway\\Processed",
-    "\\\\PassportServer\\XMLGateway\\BOOutbox",
+    "C:\\Gilbarco\\Passport\\XMLGateway\\BOOutbox",
+    "D:\\Passport\\XMLGateway\\BOOutbox",
+    "D:\\Program Files\\Passport\\XMLGateway\\BOOutbox",
   ];
-  for (const candidate of candidates) {
-    try {
-      if (fs.existsSync(candidate)) return { found: true, path: candidate };
-    } catch {
-      /* ignore unreadable path */
-    }
+
+  // Verifone Commander default share paths
+  const localVerifone = [
+    "C:\\Commander\\Export",
+    "C:\\Program Files\\Verifone\\Commander\\Export",
+  ];
+
+  // Network / UNC paths — checked last with a strict timeout
+  const networkCandidates = [
+    "\\\\PassportServer\\XMLGateway\\BOOutbox",
+    "\\\\localhost\\XMLGateway\\BOOutbox",
+  ];
+
+  for (const p of [...localCandidates, ...localVerifone]) {
+    if (localExists(p)) return { found: true, path: p };
   }
+
+  for (const p of networkCandidates) {
+    if (networkExists(p, 3000)) return { found: true, path: p };
+  }
+
   return { found: false, path: "" };
 });
 
 // Manual folder picker fallback.
 ipcMain.handle("browse-folder", async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
-    title: "Select the Passport XML folder",
+    title: "Select the POS data folder",
     properties: ["openDirectory"],
   });
   if (result.canceled || result.filePaths.length === 0) return { path: "" };
   return { path: result.filePaths[0] };
+});
+
+// Lightweight account lookup — checks if an email is registered.
+// Returns { found: bool, storeName?: string }.
+// If the backend endpoint doesn't exist yet the caller handles the 404 gracefully.
+ipcMain.handle("lookup-email", async (_event, { email }) => {
+  try {
+    const { res, data } = await getJson(
+      `${CLOUD_URL}/api/edge/lookup-email?email=${encodeURIComponent(email)}`
+    );
+    if (res.status === 404 || res.status === 405) {
+      // Endpoint not yet deployed — degrade gracefully.
+      return { found: null, degraded: true };
+    }
+    if (!res.ok) return { found: false };
+    return { found: true, storeName: data.storeName || "" };
+  } catch {
+    return { found: null, degraded: true };
+  }
 });
 
 // Existing-account login.
@@ -161,13 +268,17 @@ ipcMain.handle("api-signup", async (_event, payload) => {
       legalName: payload.legalName,
       displayName: payload.displayName,
       email: payload.email,
+      phone: payload.phone || "",
       password: payload.password,
       stores: [
         {
           code: "main",
           name: payload.storeName,
+          address: payload.address || "",
           city: payload.city,
           state: payload.state,
+          zip: payload.zip || "",
+          phone: payload.phone || "",
         },
       ],
       posType: payload.posType || "passport",
@@ -211,37 +322,41 @@ ipcMain.handle("install-edge", async (event, opts) => {
     fs.copyFileSync(bundledEdgePath(), edgeDest);
     send(2, "done", `Connector installed (${fs.statSync(edgeDest).size.toLocaleString()} bytes).`);
 
-    // --- Step 3: download + unpack nssm ----------------------------------
-    send(3, "running", "Downloading the Windows service manager…");
-    const zipPath = path.join(INSTALL_DIR, "nssm.zip");
-    const nssmRes = await fetch(NSSM_URL);
-    if (!nssmRes.ok) throw new Error(`Could not download nssm (${nssmRes.status})`);
-    fs.writeFileSync(zipPath, Buffer.from(await nssmRes.arrayBuffer()));
-
-    const extractDir = path.join(INSTALL_DIR, "nssm_extract");
-    powershell(
-      `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${extractDir}' -Force`
-    );
-    const nssmSrc = path.join(extractDir, "nssm-2.24", "win64", "nssm.exe");
-    fs.copyFileSync(nssmSrc, path.join(INSTALL_DIR, "nssm.exe"));
+    // --- Step 3: install the bundled service manager (nssm) --------------
+    send(3, "running", "Setting up the Windows service manager…");
+    const nssmSrc = bundledNssmPath();
+    const nssmDest = path.join(INSTALL_DIR, "nssm.exe");
+    if (!localExists(nssmSrc)) {
+      throw new Error(
+        "nssm.exe is missing from the installer bundle. Please re-download the installer from stealthpos.net/download."
+      );
+    }
+    fs.copyFileSync(nssmSrc, nssmDest);
     send(3, "done", "Service manager ready.");
 
-    // --- Step 4: install + start the service -----------------------------
-    send(4, "running", `Installing the ${SERVICE_NAME} service…`);
+    // --- Step 4: locate Node.js ------------------------------------------
+    send(4, "running", "Locating Node.js runtime…");
+    const nodePath = findNodeExe();
+    if (!nodePath) {
+      throw new Error(
+        "Node.js is not installed on this machine. " +
+        "Please install it from nodejs.org (LTS version), then run this installer again."
+      );
+    }
+    send(4, "done", `Node.js found: ${nodePath}`);
 
-    // Clean any prior install so re-running the wizard is safe.
+    // --- Step 5: install + start the service -----------------------------
+    send(5, "running", `Installing the ${SERVICE_NAME} service…`);
     nssmQuiet(["stop", SERVICE_NAME]);
     nssmQuiet(["remove", SERVICE_NAME, "confirm"]);
 
-    nssm(["install", SERVICE_NAME, "node.exe", "C:\\StealthPOS\\edge.cjs"]);
+    nssm(["install", SERVICE_NAME, nodePath, "C:\\StealthPOS\\edge.cjs"]);
     nssm(["set", SERVICE_NAME, "AppDirectory", "C:\\StealthPOS"]);
     nssm(["set", SERVICE_NAME, "AppStdout", "C:\\StealthPOS\\stdout.log"]);
     nssm(["set", SERVICE_NAME, "AppStderr", "C:\\StealthPOS\\stderr.log"]);
     nssm(["set", SERVICE_NAME, "Start", "SERVICE_AUTO_START"]);
     nssm([
-      "set",
-      SERVICE_NAME,
-      "AppEnvironmentExtra",
+      "set", SERVICE_NAME, "AppEnvironmentExtra",
       `BOS_EDGE_SECRET=${secret}`,
       `BOS_STORE_ID=${storeId}`,
       `BOS_CLOUD_URL=${cloud}`,
@@ -249,10 +364,10 @@ ipcMain.handle("install-edge", async (event, opts) => {
       `BOS_MODE=${mode}`,
     ]);
     nssm(["start", SERVICE_NAME]);
-    send(4, "done", "Service installed and started.");
+    send(5, "done", "Service installed and started.");
 
-    // --- Step 5: watch the log for first activity ------------------------
-    send(5, "running", "Waiting for the connector to come online…");
+    // --- Step 6: watch the log for first activity ------------------------
+    send(6, "running", "Waiting for the connector to come online…");
     const logPath = path.join(INSTALL_DIR, "stdout.log");
     const deadline = Date.now() + 30000;
     let cursor = 0;
@@ -261,11 +376,11 @@ ipcMain.handle("install-edge", async (event, opts) => {
     while (Date.now() < deadline) {
       await sleep(1000);
       try {
-        if (!fs.existsSync(logPath)) continue;
+        if (!localExists(logPath)) continue;
         const content = fs.readFileSync(logPath, "utf8");
         if (content.length > cursor) {
           const fresh = content.slice(cursor).split(/\r?\n/).filter(Boolean);
-          for (const line of fresh) send(5, "running", line);
+          for (const line of fresh) send(6, "running", line);
           cursor = content.length;
         }
         if (/uploaded|Connector starting/i.test(content)) {
@@ -278,13 +393,9 @@ ipcMain.handle("install-edge", async (event, opts) => {
     }
 
     if (connected) {
-      send(5, "done", "Connected — your store data is flowing to StealthPOS.");
+      send(6, "done", "Connected — your store data is flowing to StealthPOS.");
     } else {
-      send(
-        5,
-        "done",
-        "Service is running. Data will upload automatically as POS files arrive."
-      );
+      send(6, "done", "Service is running. Data will upload automatically as POS files arrive.");
     }
 
     return { ok: true };

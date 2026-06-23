@@ -11,6 +11,8 @@ files:
 extraResources:
   - from: resources/edge.cjs
     to: edge.cjs
+  - from: resources/nssm.exe
+    to: nssm.exe
 win:
   target: nsis
   requestedExecutionLevel: requireAdministrator
