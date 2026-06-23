@@ -262,13 +262,120 @@ ipcMain.handle("api-signup", async (_event, payload) => {
   }
 });
 
-// Install + start the background connector service.
+// ---------------------------------------------------------------------------
+// Install helpers
+// ---------------------------------------------------------------------------
+
+const EDGE_PATH = path.join(INSTALL_DIR, "edge.cjs");
+const STDOUT_LOG = path.join(INSTALL_DIR, "stdout.log");
+const LAUNCHER_PATH = path.join(INSTALL_DIR, "run-connector.ps1");
+
+// Connector log when running as a logon task (writes to the user's profile).
+function taskLogPath() {
+  const local = process.env.LOCALAPPDATA || path.join(INSTALL_DIR, "logs");
+  return path.join(local, "StealthPOS", "connector.log");
+}
+
+// Keep the PC awake so syncing never stops — a sleeping CPU runs nothing.
+// Best-effort: never standby / never hibernate on both AC and battery.
+function powerNeverSleep() {
+  for (const c of [
+    "powercfg /change standby-timeout-ac 0",
+    "powercfg /change standby-timeout-dc 0",
+    "powercfg /change hibernate-timeout-ac 0",
+    "powercfg /change hibernate-timeout-dc 0",
+    "powercfg /hibernate off",
+  ]) {
+    try { powershell(c); } catch { /* best effort */ }
+  }
+}
+
+function envKeys(o) {
+  return [
+    `BOS_EDGE_SECRET=${o.secret}`,
+    `BOS_STORE_ID=${o.storeId}`,
+    `BOS_CLOUD_URL=${o.cloud}`,
+    `BOS_WATCH_DIR=${o.watchDir}`,
+    `BOS_MODE=${o.mode}`,
+  ];
+}
+
+function nssmBaseInstall(nodePath) {
+  nssmQuiet(["stop", SERVICE_NAME]);
+  nssmQuiet(["remove", SERVICE_NAME, "confirm"]);
+  nssm(["install", SERVICE_NAME, nodePath, EDGE_PATH]);
+  nssm(["set", SERVICE_NAME, "AppDirectory", INSTALL_DIR]);
+  nssm(["set", SERVICE_NAME, "AppStdout", STDOUT_LOG]);
+  nssm(["set", SERVICE_NAME, "AppStderr", path.join(INSTALL_DIR, "stderr.log")]);
+  nssm(["set", SERVICE_NAME, "Start", "SERVICE_AUTO_START"]);
+}
+
+// LOCAL folder → plain LocalSystem service (no network credentials needed).
+function installSystemService(nodePath, env) {
+  removeLogonTask();
+  nssmBaseInstall(nodePath);
+  nssm(["set", SERVICE_NAME, "AppEnvironmentExtra", ...envKeys(env)]);
+  nssm(["start", SERVICE_NAME]);
+}
+
+// NETWORK share → service running AS THE USER. Survives logout/reboot/sleep,
+// runs with a full token (no UAC filtering), and authenticates to the share
+// as that user. Requires the user's Windows password (collected in the wizard).
+function installUserService(nodePath, env, winUser, winPass) {
+  removeLogonTask();
+  nssmBaseInstall(nodePath);
+  // nssm grants the "Log on as a service" right to the account automatically.
+  nssm(["set", SERVICE_NAME, "ObjectName", winUser, winPass]);
+  nssm(["set", SERVICE_NAME, "AppEnvironmentExtra", ...envKeys(env)]);
+  nssm(["start", SERVICE_NAME]);
+}
+
+function removeLogonTask() {
+  try {
+    powershell(`Unregister-ScheduledTask -TaskName '${SERVICE_NAME}' -Confirm:$false -ErrorAction SilentlyContinue`);
+  } catch { /* none */ }
+}
+
+// NETWORK share, no stored password → elevated logon task. No password needed;
+// runs in the user's session at logon (and now). Works whenever the user is
+// logged in (always true for an always-on register PC). MUST be RunLevel
+// Highest — at standard level Windows blocks file reads from the share.
+function installLogonTask(nodePath, env) {
+  nssmQuiet(["stop", SERVICE_NAME]);
+  nssmQuiet(["remove", SERVICE_NAME, "confirm"]);
+  const launcher = [
+    '$ErrorActionPreference="Continue"',
+    ...envKeys(env).map((kv) => {
+      const i = kv.indexOf("=");
+      return `$env:${kv.slice(0, i)}=${JSON.stringify(kv.slice(i + 1))}`;
+    }),
+    '$l=Join-Path $env:LOCALAPPDATA "StealthPOS"; New-Item -ItemType Directory -Force $l | Out-Null',
+    `& ${JSON.stringify(nodePath)} ${JSON.stringify(EDGE_PATH)} *>> (Join-Path $l "connector.log")`,
+  ].join("\r\n");
+  fs.writeFileSync(LAUNCHER_PATH, launcher, "utf8");
+  const setup = [
+    `$u = (Get-CimInstance Win32_ComputerSystem).UserName`,
+    `$act = New-ScheduledTaskAction -Execute "powershell.exe" -Argument '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "${LAUNCHER_PATH}"'`,
+    `$trg = New-ScheduledTaskTrigger -AtLogOn -User $u`,
+    `$prn = New-ScheduledTaskPrincipal -UserId $u -LogonType Interactive -RunLevel Highest`,
+    `$set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)`,
+    `Register-ScheduledTask -TaskName "${SERVICE_NAME}" -Action $act -Trigger $trg -Principal $prn -Settings $set -Force | Out-Null`,
+    `Start-ScheduledTask -TaskName "${SERVICE_NAME}"`,
+  ].join("; ");
+  powershell(setup);
+}
+
+// Install + start the background connector. Picks the run context based on
+// whether the watch dir is a network share and whether Windows creds were
+// provided — see installSystemService / installUserService / installLogonTask.
 ipcMain.handle("install-edge", async (event, opts) => {
   const send = (step, status, log) =>
     event.sender.send("install-progress", { step, status, log });
 
-  const { secret, storeId, watchDir, mode, cloudUrl } = opts;
+  const { secret, storeId, watchDir, mode, cloudUrl, winUser, winPass } = opts;
   const cloud = cloudUrl || CLOUD_URL;
+  const env = { secret, storeId, cloud, watchDir, mode };
+  const isUnc = /^\\\\/.test(watchDir || "");
 
   try {
     // --- Step 1: create install directory --------------------------------
@@ -278,20 +385,18 @@ ipcMain.handle("install-edge", async (event, opts) => {
 
     // --- Step 2: install the bundled connector ---------------------------
     send(2, "running", "Installing the StealthPOS connector…");
-    const edgeDest = path.join(INSTALL_DIR, "edge.cjs");
-    fs.copyFileSync(bundledEdgePath(), edgeDest);
-    send(2, "done", `Connector installed (${fs.statSync(edgeDest).size.toLocaleString()} bytes).`);
+    fs.copyFileSync(bundledEdgePath(), EDGE_PATH);
+    send(2, "done", `Connector installed (${fs.statSync(EDGE_PATH).size.toLocaleString()} bytes).`);
 
     // --- Step 3: install the bundled service manager (nssm) --------------
     send(3, "running", "Setting up the Windows service manager…");
     const nssmSrc = bundledNssmPath();
-    const nssmDest = path.join(INSTALL_DIR, "nssm.exe");
     if (!localExists(nssmSrc)) {
       throw new Error(
         "nssm.exe is missing from the installer bundle. Please re-download the installer from stealthpos.net/download."
       );
     }
-    fs.copyFileSync(nssmSrc, nssmDest);
+    fs.copyFileSync(nssmSrc, path.join(INSTALL_DIR, "nssm.exe"));
     send(3, "done", "Service manager ready.");
 
     // --- Step 4: locate Node.js ------------------------------------------
@@ -305,33 +410,35 @@ ipcMain.handle("install-edge", async (event, opts) => {
     }
     send(4, "done", `Node.js found: ${nodePath}`);
 
-    // --- Step 5: install + start the service -----------------------------
-    send(5, "running", `Installing the ${SERVICE_NAME} service…`);
-    nssmQuiet(["stop", SERVICE_NAME]);
-    nssmQuiet(["remove", SERVICE_NAME, "confirm"]);
+    // --- Step 5: keep the PC awake so syncing never stops ----------------
+    send(5, "running", "Setting the PC to stay awake so data keeps syncing…");
+    powerNeverSleep();
+    send(5, "done", "Power settings: never sleep, never hibernate.");
 
-    nssm(["install", SERVICE_NAME, nodePath, "C:\\StealthPOS\\edge.cjs"]);
-    nssm(["set", SERVICE_NAME, "AppDirectory", "C:\\StealthPOS"]);
-    nssm(["set", SERVICE_NAME, "AppStdout", "C:\\StealthPOS\\stdout.log"]);
-    nssm(["set", SERVICE_NAME, "AppStderr", "C:\\StealthPOS\\stderr.log"]);
-    nssm(["set", SERVICE_NAME, "Start", "SERVICE_AUTO_START"]);
-    nssm([
-      "set", SERVICE_NAME, "AppEnvironmentExtra",
-      `BOS_EDGE_SECRET=${secret}`,
-      `BOS_STORE_ID=${storeId}`,
-      `BOS_CLOUD_URL=${cloud}`,
-      `BOS_WATCH_DIR=${watchDir}`,
-      `BOS_MODE=${mode}`,
-    ]);
-    nssm(["start", SERVICE_NAME]);
-    send(5, "done", "Service installed and started.");
+    // --- Step 6: install the connector in the right run context ----------
+    let runMode;
+    if (!isUnc) {
+      send(6, "running", `Installing the ${SERVICE_NAME} background service…`);
+      installSystemService(nodePath, env);
+      runMode = "service";
+    } else if (winUser && winPass) {
+      send(6, "running", `Installing the always-on service (runs as ${winUser})…`);
+      installUserService(nodePath, env, winUser, winPass);
+      runMode = "user-service";
+    } else {
+      send(6, "running", "Installing the auto-start connector…");
+      installLogonTask(nodePath, env);
+      runMode = "logon-task";
+    }
+    send(6, "done", "Connector installed and started.");
 
-    // --- Step 6: watch the log for first activity ------------------------
-    send(6, "running", "Waiting for the connector to come online…");
-    const logPath = path.join(INSTALL_DIR, "stdout.log");
-    const deadline = Date.now() + 30000;
+    // --- Step 7: confirm it can READ the folder and is flowing -----------
+    send(7, "running", "Confirming the connector can read your POS folder…");
+    const logPath = runMode === "logon-task" ? taskLogPath() : STDOUT_LOG;
+    const deadline = Date.now() + 35000;
     let cursor = 0;
     let connected = false;
+    let permError = false;
 
     while (Date.now() < deadline) {
       await sleep(1000);
@@ -340,8 +447,12 @@ ipcMain.handle("install-edge", async (event, opts) => {
         const content = fs.readFileSync(logPath, "utf8");
         if (content.length > cursor) {
           const fresh = content.slice(cursor).split(/\r?\n/).filter(Boolean);
-          for (const line of fresh) send(6, "running", line);
+          for (const line of fresh) send(7, "running", line);
           cursor = content.length;
+        }
+        if (/EPERM|operation not permitted|readdir failed/i.test(content)) {
+          permError = true;
+          break;
         }
         if (/uploaded|Connector starting/i.test(content)) {
           connected = true;
@@ -352,13 +463,21 @@ ipcMain.handle("install-edge", async (event, opts) => {
       }
     }
 
-    if (connected) {
-      send(6, "done", "Connected — your store data is flowing to StealthPOS.");
-    } else {
-      send(6, "done", "Service is running. Data will upload automatically as POS files arrive.");
+    if (permError) {
+      // The run context can't read the share — the classic LocalSystem-on-a-
+      // network-share case. Tell the user how to fix it (provide Windows creds).
+      send(7, "error",
+        "The connector started but can't read your network folder with the current account. " +
+        "Re-run setup and enter your Windows username + password on the network-folder step so it can run as you."
+      );
+      return { ok: false, runMode, permError: true };
     }
-
-    return { ok: true };
+    if (connected) {
+      send(7, "done", "Connected — your store data is flowing to StealthPOS.");
+    } else {
+      send(7, "done", "Connector is running. Data will upload automatically as POS files arrive.");
+    }
+    return { ok: true, runMode };
   } catch (err) {
     send(0, "error", err.message || String(err));
     return { ok: false, message: err.message || String(err) };

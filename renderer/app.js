@@ -10,6 +10,8 @@ const state = {
   posType: "",   // set on POS screen — "passport" | "commander" | "other"
   mode: "",
   watchDir: "",
+  winUser: "",   // optional Windows creds for run-as-user service (network shares)
+  winPass: "",
 };
 
 // Which step-indicator dot (1-6) each screen maps to.
@@ -21,6 +23,7 @@ const SCREEN_STEP = {
   pos:        4,
   backoffice: 5,
   folder:     6,
+  wincreds:   6,
   installing: 6,
   done:       6,
 };
@@ -403,6 +406,36 @@ document.getElementById("browseBtn").addEventListener("click", async () => {
 
 folderContinue.addEventListener("click", () => {
   if (!state.watchDir) return; // should never happen given the disabled state
+  // A network share needs a run context that can reach it. Offer to store the
+  // PC's Windows sign-in so it syncs even when logged out. Local folders just
+  // run as a service and skip this.
+  if (isUncPath(state.watchDir)) {
+    showScreen("wincreds");
+  } else {
+    showScreen("installing");
+  }
+});
+
+// --- Screen 6b: Windows credentials (network shares) -----------------------
+const winUserInput   = document.getElementById("winUser");
+const winPassInput    = document.getElementById("winPass");
+const wincredsError   = document.getElementById("wincredsError");
+
+document.getElementById("winContinueBtn").addEventListener("click", () => {
+  const u = winUserInput.value.trim();
+  const p = winPassInput.value;
+  if (!u || !p) {
+    showErr(wincredsError, "Enter your Windows username and password, or tap Skip.");
+    return;
+  }
+  state.winUser = u;
+  state.winPass = p;
+  showScreen("installing");
+});
+
+document.getElementById("winSkipBtn").addEventListener("click", () => {
+  state.winUser = "";
+  state.winPass = "";
   showScreen("installing");
 });
 
@@ -428,7 +461,7 @@ function appendLog(line) {
 
 if (window.stealth && window.stealth.onInstallProgress) {
   window.stealth.onInstallProgress((d) => {
-    if (d.step >= 1 && d.step <= 6) setStep(d.step, d.status);
+    if (d.step >= 1 && d.step <= 7) setStep(d.step, d.status);
     if (d.status === "error") {
       setStep(d.step || 1, "error");
       appendLog("ERROR: " + d.log);
@@ -446,6 +479,8 @@ async function startInstall() {
     storeId:  state.storeId,
     watchDir: state.watchDir,
     mode:     state.mode,
+    winUser:  state.winUser,
+    winPass:  state.winPass,
     cloudUrl: "https://stealthpos.net",
   });
   if (res.ok) {

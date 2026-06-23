@@ -244,6 +244,35 @@
         </div>
       </section>
 
+      <!-- 6b. Windows credentials (network shares only) -->
+      <section class="screen" data-screen="wincreds">
+        <h2>Keep syncing 24/7</h2>
+        <p class="sub">
+          Your POS data is on a network folder. To keep sending it even when no
+          one is signed in to this PC, the connector needs this computer's Windows
+          sign-in. It's stored only on this PC and used just to run in the background.
+        </p>
+        <form id="wincredsForm" class="form">
+          <label class="field">
+            <span>Windows username</span>
+            <input type="text" id="winUser" autocomplete="off" placeholder="e.g. .\Owner or DOMAIN\user" />
+          </label>
+          <label class="field">
+            <span>Windows password</span>
+            <input type="password" id="winPass" autocomplete="off" />
+          </label>
+          <div class="inline-error" id="wincredsError" hidden></div>
+        </form>
+        <div class="field-note">
+          Don't want to store it? You can skip — the connector will then sync only
+          while someone is signed in to this PC (fine for an always-on register PC).
+        </div>
+        <div class="actions actions-split">
+          <button class="btn btn-ghost" id="winSkipBtn">Skip</button>
+          <button class="btn btn-primary" id="winContinueBtn">Install Connector</button>
+        </div>
+      </section>
+
       <!-- 7. Installing -->
       <section class="screen" data-screen="installing">
         <h2>Installing the connector</h2>
@@ -253,8 +282,9 @@
           <li data-instep="2"><span class="step-mark"></span><span class="step-text">Install the connector</span></li>
           <li data-instep="3"><span class="step-mark"></span><span class="step-text">Set up the Windows service manager</span></li>
           <li data-instep="4"><span class="step-mark"></span><span class="step-text">Locate Node.js runtime</span></li>
-          <li data-instep="5"><span class="step-mark"></span><span class="step-text">Install &amp; start the service</span></li>
-          <li data-instep="6"><span class="step-mark"></span><span class="step-text">Confirm data is flowing</span></li>
+          <li data-instep="5"><span class="step-mark"></span><span class="step-text">Keep the PC awake for 24/7 sync</span></li>
+          <li data-instep="6"><span class="step-mark"></span><span class="step-text">Install &amp; start the connector</span></li>
+          <li data-instep="7"><span class="step-mark"></span><span class="step-text">Confirm data is flowing</span></li>
         </ol>
         <pre class="log" id="installLog" aria-live="polite"></pre>
       </section>

@@ -98,6 +98,8 @@ if (config.mode === "owner") {
 }
 
 const INGEST_URL = `${config.cloudUrl}/api/app/passportBos/ingest`;
+const HEARTBEAT_URL = `${config.cloudUrl}/api/app/passportBos/heartbeat`;
+config.heartbeatMs = parseInt(process.env.BOS_HEARTBEAT_MS || "120000", 10);
 
 function log(msg, extra) {
   const stamp = new Date().toISOString();
@@ -170,6 +172,35 @@ async function uploadFile(absPath) {
     );
   }
   return parsed;
+}
+
+// ------------------------------------------------------------------------- //
+// Heartbeat — tells the cloud the connector is alive even when there are no
+// new files, so the dashboard shows "Connected" instead of "Idle/Offline".
+// Best-effort: a failed heartbeat is logged quietly and retried next tick.
+// ------------------------------------------------------------------------- //
+async function sendHeartbeat() {
+  try {
+    const resp = await fetch(HEARTBEAT_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Bos-Edge-Secret": config.secret,
+      },
+      body: JSON.stringify({
+        storeId: config.storeId,
+        mode: config.mode,
+        watchDir: config.watchDir,
+        version: 3,
+        ts: new Date().toISOString(),
+      }),
+    });
+    if (resp.ok) log("heartbeat ok");
+  } catch (err) {
+    log("heartbeat failed (will retry)", {
+      err: String(err && err.message ? err.message : err),
+    });
+  }
 }
 
 // ------------------------------------------------------------------------- //
@@ -326,9 +357,13 @@ async function main() {
   setInterval(() => {
     retryOutbox().catch(() => undefined);
   }, config.retryMs);
+  setInterval(() => {
+    sendHeartbeat().catch(() => undefined);
+  }, config.heartbeatMs);
 
-  // Kick off an immediate first pass
+  // Kick off an immediate first pass + heartbeat
   pollWatchDir().catch(() => undefined);
+  sendHeartbeat().catch(() => undefined);
 
   for (const sig of ["SIGINT", "SIGTERM"]) {
     process.on(sig, () => {
