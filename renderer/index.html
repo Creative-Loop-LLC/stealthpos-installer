@@ -229,7 +229,7 @@
           <span class="detect-warn">!</span>
           <div>
             <strong>We couldn't find it automatically</strong>
-            <span class="store-found-sub">Pick the folder manually below, or try again.</span>
+            <span class="store-found-sub">Tap <b>Browse</b> to pick your POS folder (often named “XMLGateway”), or <b>Scan again</b>. Not sure where it is? <a href="#" id="folderHelpLink">Get help from StealthPOS</a> — we'll find it with you.</span>
           </div>
         </div>
 
@@ -252,29 +252,33 @@
 
       <!-- 6b. Windows credentials (network shares only) -->
       <section class="screen" data-screen="wincreds">
-        <h2>Keep syncing 24/7</h2>
+        <h2>Keep syncing even when no one's signed in</h2>
         <p class="sub">
-          Your POS data is on a network folder. To keep sending it even when no
-          one is signed in to this PC, the connector needs this computer's Windows
-          sign-in. It's stored only on this PC and used just to run in the background.
+          Your sales data lives on another computer on your network. So the connector
+          can keep sending it 24/7 — even after a restart or when this PC is locked —
+          enter the password you use to turn on this computer. It never leaves this PC.
         </p>
+        <div class="winuser-pill" id="winUserPill" hidden>
+          <span class="winuser-pill-label">This PC</span>
+          <strong id="winUserName">—</strong>
+        </div>
         <form id="wincredsForm" class="form">
-          <label class="field">
-            <span>Windows username</span>
-            <input type="text" id="winUser" autocomplete="off" placeholder="e.g. .\Owner or DOMAIN\user" />
+          <label class="field" id="winUserField" hidden>
+            <span>This PC's Windows account <em class="hint">(filled in for you)</em></span>
+            <input type="text" id="winUser" autocomplete="off" />
           </label>
           <label class="field">
-            <span>Windows password</span>
+            <span>Password for this PC <em class="hint">(what you type to sign in to this computer)</em></span>
             <input type="password" id="winPass" autocomplete="off" />
           </label>
           <div class="inline-error" id="wincredsError" hidden></div>
         </form>
         <div class="field-note">
-          Don't want to store it? You can skip — the connector will then sync only
-          while someone is signed in to this PC (fine for an always-on register PC).
+          Don't know the password? Tap <strong>Skip</strong> — the connector still syncs
+          whenever someone is signed in to this PC (which a store register always is).
         </div>
         <div class="actions actions-split">
-          <button class="btn btn-ghost" id="winSkipBtn">Skip</button>
+          <button class="btn btn-ghost" id="winSkipBtn">Skip for now</button>
           <button class="btn btn-primary" id="winContinueBtn">Install Connector</button>
         </div>
       </section>

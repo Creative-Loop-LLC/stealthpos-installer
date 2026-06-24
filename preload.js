@@ -10,8 +10,10 @@ contextBridge.exposeInMainWorld("stealth", {
   apiSignup:       (data)   => ipcRenderer.invoke("api-signup", data),
   addressAutocomplete: (q)       => ipcRenderer.invoke("address-autocomplete", { q }),
   addressDetails:      (placeId) => ipcRenderer.invoke("address-details", { placeId }),
+  getWindowsUser:      ()        => ipcRenderer.invoke("get-windows-user"),
   installEdge:     (opts)   => ipcRenderer.invoke("install-edge", opts),
   openDashboard:   ()       => ipcRenderer.invoke("open-dashboard"),
+  openSupport:     ()       => ipcRenderer.invoke("open-support"),
   onInstallProgress: (cb)   =>
     ipcRenderer.on("install-progress", (_event, data) => cb(data)),
 });

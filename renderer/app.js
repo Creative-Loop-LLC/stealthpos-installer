@@ -41,6 +41,7 @@ function showScreen(name) {
   updateStepbar(SCREEN_STEP[name] || 1, name === "done");
 
   if (name === "folder") onFolderScreenEnter();
+  if (name === "wincreds") onWincredsEnter();
   if (name === "installing") startInstall();
 }
 
@@ -441,6 +442,15 @@ retryDetectBtn.addEventListener("click", () => {
   runDetect();
 });
 
+// "Get help" link on the folder not-found state.
+document.addEventListener("click", (e) => {
+  const t = e.target;
+  if (t && t.id === "folderHelpLink") {
+    e.preventDefault();
+    if (window.stealth && window.stealth.openSupport) window.stealth.openSupport();
+  }
+});
+
 document.getElementById("browseBtn").addEventListener("click", async () => {
   const res = await window.stealth.browseFolder();
   if (res.path) {
@@ -462,15 +472,44 @@ folderContinue.addEventListener("click", () => {
 });
 
 // --- Screen 6b: Windows credentials (network shares) -----------------------
-const winUserInput   = document.getElementById("winUser");
-const winPassInput    = document.getElementById("winPass");
-const wincredsError   = document.getElementById("wincredsError");
+const winUserInput  = document.getElementById("winUser");
+const winUserField  = document.getElementById("winUserField");
+const winUserPill   = document.getElementById("winUserPill");
+const winUserName   = document.getElementById("winUserName");
+const winPassInput  = document.getElementById("winPass");
+const wincredsError = document.getElementById("wincredsError");
+
+// On entry, auto-detect this PC's Windows account so the client never has to
+// know/type their username — they only enter the password they already use.
+async function onWincredsEnter() {
+  clearErr(wincredsError);
+  winPassInput.value = "";
+  let detected = null;
+  if (window.stealth && window.stealth.getWindowsUser) {
+    try { detected = await window.stealth.getWindowsUser(); } catch { /* fall back */ }
+  }
+  if (detected && detected.user) {
+    winUserInput.value = detected.user;            // used by install (DOMAIN\user)
+    winUserName.textContent = detected.display || detected.user;
+    winUserPill.hidden = false;                    // show the account as read-only info
+    winUserField.hidden = true;                    // hide the manual username field
+    setTimeout(() => winPassInput.focus(), 60);
+  } else {
+    winUserPill.hidden = true;                     // couldn't detect — let them type it
+    winUserField.hidden = false;
+  }
+}
 
 document.getElementById("winContinueBtn").addEventListener("click", () => {
+  clearErr(wincredsError);
   const u = winUserInput.value.trim();
   const p = winPassInput.value;
-  if (!u || !p) {
-    showErr(wincredsError, "Enter your Windows username and password, or tap Skip.");
+  if (!p) {
+    showErr(wincredsError, "Enter this PC's password, or tap Skip for now.");
+    return;
+  }
+  if (!u) {
+    showErr(wincredsError, "We couldn't read this PC's account — type your Windows username, or tap Skip.");
     return;
   }
   state.winUser = u;

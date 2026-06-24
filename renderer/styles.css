@@ -518,6 +518,35 @@ h2 {
   padding: 2px 0;
 }
 
+/* ---------- Windows account pill (wincreds) ---------- */
+.winuser-pill {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: #f0fdf4;
+  border: 1.5px solid #bbf7d0;
+  border-radius: 12px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+}
+.winuser-pill-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ok);
+  background: #fff;
+  border: 1px solid #bbf7d0;
+  border-radius: 999px;
+  padding: 2px 9px;
+  flex: 0 0 auto;
+}
+.winuser-pill strong {
+  font-size: 14.5px;
+  color: var(--ink);
+  word-break: break-all;
+}
+
 /* ---------- Signup hint + address autocomplete ---------- */
 .field span .hint {
   font-style: normal;

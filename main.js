@@ -198,6 +198,22 @@ ipcMain.handle("lookup-email", async (_event, { email }) => {
   }
 });
 
+// Current Windows account (so the wizard can pre-fill it — the client should
+// never have to know/type their Windows username format). Returns DOMAIN\user
+// (or .\user for a local account).
+ipcMain.handle("get-windows-user", () => {
+  const name = process.env.USERNAME || "";
+  const domain = process.env.USERDOMAIN || "";
+  const compName = process.env.COMPUTERNAME || "";
+  if (!name) return { user: "", display: "" };
+  // Local account → DOMAIN equals the computer name; show ".\name" which nssm
+  // accepts and reads as "this PC's local account".
+  const isLocal = !domain || domain.toUpperCase() === compName.toUpperCase();
+  const user = isLocal ? `.\\${name}` : `${domain}\\${name}`;
+  const display = isLocal ? name : `${domain}\\${name}`;
+  return { user, display };
+});
+
 // Address autocomplete (proxied through the cloud so the Google key stays
 // server-side). Returns [] gracefully if the backend has no key configured.
 ipcMain.handle("address-autocomplete", async (_event, { q }) => {
@@ -510,5 +526,11 @@ ipcMain.handle("install-edge", async (event, opts) => {
 // Open the cloud dashboard in the default browser.
 ipcMain.handle("open-dashboard", () => {
   shell.openExternal(`${CLOUD_URL}/admin`);
+  return { ok: true };
+});
+
+// Open a support channel (folder-not-found "get help").
+ipcMain.handle("open-support", () => {
+  shell.openExternal("mailto:support@stealthpos.net?subject=StealthPOS%20Connector%20setup%20help");
   return { ok: true };
 });
