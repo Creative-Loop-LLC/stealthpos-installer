@@ -481,8 +481,23 @@ ipcMain.handle("install-edge", async (event, opts) => {
       runMode = "service";
     } else if (winUser && winPass) {
       send(6, "running", `Installing the always-on service (runs as ${winUser})…`);
-      installUserService(nodePath, env, winUser, winPass);
-      runMode = "user-service";
+      try {
+        installUserService(nodePath, env, winUser, winPass);
+        runMode = "user-service";
+      } catch (svcErr) {
+        // Windows rejected the service logon (error 1069). Happens when the
+        // password is wrong, or — very common on modern PCs — the account signs
+        // in with a PIN / Microsoft account / Windows Hello and has no password
+        // usable to run a service. DON'T dead-end at "contact support": fall back
+        // to the no-password logon task, which runs whenever the register is
+        // signed in (always true for an always-on POS PC). installLogonTask first
+        // stops+removes the half-installed service, so this is a clean switch.
+        send(6, "running",
+          "Those Windows credentials couldn't start a background service — " +
+          "switching to the no-password auto-start method (works while the register is signed in)…");
+        installLogonTask(nodePath, env);
+        runMode = "logon-task-fallback";
+      }
     } else {
       send(6, "running", "Installing the auto-start connector…");
       installLogonTask(nodePath, env);
