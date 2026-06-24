@@ -1,4 +1,5 @@
 const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
+const { autoUpdater } = require("electron-updater");
 const fs = require("fs");
 const path = require("path");
 const { execFileSync, spawnSync } = require("child_process");
@@ -22,6 +23,14 @@ function bundledNssmPath() {
   return app.isPackaged
     ? path.join(process.resourcesPath, "nssm.exe")
     : path.join(__dirname, "resources", "nssm.exe");
+}
+
+// node.exe ships bundled in resources/ so the connector runs on any PC
+// regardless of whether Node.js is installed system-wide.
+function bundledNodePath() {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, "node.exe")
+    : path.join(__dirname, "resources", "node.exe");
 }
 
 let mainWindow = null;
@@ -52,6 +61,12 @@ app.whenReady().then(() => {
   createWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  });
+
+  // Check for updates silently; notify renderer when one is downloaded.
+  autoUpdater.checkForUpdatesAndNotify().catch(() => { /* offline or no release */ });
+  autoUpdater.on("update-downloaded", () => {
+    if (mainWindow) mainWindow.webContents.send("update-downloaded");
   });
 });
 
@@ -123,9 +138,13 @@ function localExists(p) {
   }
 }
 
-// Locate node.exe — tries PATH first, then common install directories.
+// Locate node.exe — prefers bundled runtime, then PATH, then common installs.
 function findNodeExe() {
-  // where.exe searches PATH
+  // Bundled node takes priority — guaranteed to exist and version-matched.
+  const bundled = bundledNodePath();
+  if (localExists(bundled)) return bundled;
+
+  // Fall back to system Node if somehow bundled copy is missing.
   try {
     const r = spawnSync("where.exe", ["node.exe"], {
       windowsHide: true, encoding: "utf8", timeout: 3000,
@@ -443,8 +462,8 @@ ipcMain.handle("install-edge", async (event, opts) => {
     const nodePath = findNodeExe();
     if (!nodePath) {
       throw new Error(
-        "Node.js is not installed on this machine. " +
-        "Please install it from nodejs.org (LTS version), then run this installer again."
+        "Could not locate a Node.js runtime. " +
+        "Please re-download the installer from stealthpos.net/download and try again."
       );
     }
     send(4, "done", `Node.js found: ${nodePath}`);

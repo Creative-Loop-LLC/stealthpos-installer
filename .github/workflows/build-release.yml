@@ -1,0 +1,71 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (e.g. 1.0.6)"
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Windows Installer
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Download portable Node LTS binary to bundle into the installer.
+      # This lets the connector service run on PCs with no system Node installed.
+      - name: Download portable Node.js runtime
+        shell: pwsh
+        run: |
+          $nodeVersion = "22.16.0"
+          $url = "https://nodejs.org/dist/v$nodeVersion/node-v$nodeVersion-win-x64.zip"
+          $zip = "$env:TEMP\node-portable.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath "$env:TEMP\node-portable" -Force
+          $nodeExe = Get-ChildItem -Path "$env:TEMP\node-portable" -Recurse -Filter "node.exe" | Select-Object -First 1
+          Copy-Item -Path $nodeExe.FullName -Destination "resources\node.exe" -Force
+          Write-Host "Bundled node.exe: $($nodeExe.FullName)"
+
+      # Sign the installer if a certificate is configured.
+      # Set WIN_CSC_LINK (base64 .pfx) and WIN_CSC_KEY_PASSWORD in repo secrets.
+      - name: Build & publish
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+        run: npm run build -- --publish always
+
+      - name: Rename stable download asset
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem -Path dist -Filter "StealthPOS Connector Setup *.exe" | Select-Object -First 1
+          if ($setup) {
+            Copy-Item $setup.FullName "dist\StealthPOS-Connector-Setup.exe"
+            Write-Host "Stable asset: dist\StealthPOS-Connector-Setup.exe"
+          }
+
+      - name: Upload stable asset to release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: dist/StealthPOS-Connector-Setup.exe
+          token: ${{ secrets.GH_TOKEN }}
