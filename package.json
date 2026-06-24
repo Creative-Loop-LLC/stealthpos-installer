@@ -1,6 +1,6 @@
 {
   "name": "stealthpos-connector-installer",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "StealthPOS Connector — wizard installer that sets up the StealthPOSConnector Windows service",
   "main": "main.js",
   "author": "Stealth POS",

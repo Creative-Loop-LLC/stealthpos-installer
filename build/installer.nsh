@@ -1,49 +1,47 @@
 ; ============================================================================
-;  StealthPOS Connector — installer customizations  (electron-builder auto-includes
-;  build/installer.nsh and !insertmacro's any of the macros it defines).
+;  StealthPOS Connector — installer customizations
+;  electron-builder !include's this file (via nsis.include: build/installer.nsh)
+;  and !insertmacro's any of the macros it defines.
 ;
-;  WHY THIS EXISTS:
-;  If a previous version is still running when you install/upgrade, the running
-;  Electron GUI locks app.asar and the background service/logon-task node locks
-;  node.exe + edge.cjs. electron-builder's default behaviour is to NAG the user
-;  ("StealthPOS Connector cannot be closed. Please close it manually and click
-;  Retry") — and if that isn't resolved cleanly the upgrade SILENTLY LEAVES STALE
-;  CODE behind under the new version number (observed 2026-06-24: a 1.0.7 install
-;  kept launching an old signup form because app.asar was never replaced).
+;  WHY: if a previous version is running during install/upgrade, the Electron GUI
+;  locks app.asar and the background service/logon-task node locks node.exe +
+;  edge.cjs. electron-builder then nags "StealthPOS Connector cannot be closed…"
+;  and, if not resolved cleanly, the upgrade silently leaves STALE code behind
+;  (observed: a 1.0.7 install kept launching an old signup form). A clerk can't
+;  hunt down processes, so we close everything automatically, up front.
 ;
-;  A c-store clerk can't be expected to hunt down processes. So we close
-;  everything automatically, up front, so every install is fully clean.
+;  v1.0.8 shipped this logic as customInit but the nag still appeared in testing.
+;  v1.0.9: (1) referenced via an EXPLICIT nsis.include (not auto-detect), and
+;  (2) writes C:\stealthpos-hook.log so we can VERIFY the hook actually ran.
 ; ============================================================================
 
 !macro stealthCloseRunning
-  DetailPrint "Closing any running StealthPOS Connector before installing..."
+  ; --- verification marker: if this file appears, the hook executed ---
+  nsExec::Exec 'cmd.exe /c echo [stealth install hook ran] >> "C:\stealthpos-hook.log"'
 
-  ; 1) Background Windows service (nssm). Stopping it terminates its node child
-  ;    (which holds node.exe + edge.cjs); deleting it clears the registration so
-  ;    the fresh install re-registers from scratch.
+  ; --- background Windows service (nssm): stop frees its node child; delete clears registration ---
   nsExec::Exec 'cmd.exe /c sc stop StealthPOSConnector'
   nsExec::Exec 'cmd.exe /c sc delete StealthPOSConnector'
 
-  ; 2) "Always-on" logon scheduled task. /End terminates its running process tree
-  ;    (powershell launcher -> node), /Delete removes it.
+  ; --- always-on logon scheduled task: /End kills its process tree, /Delete removes it ---
   nsExec::Exec 'cmd.exe /c schtasks /End /TN StealthPOSConnector'
   nsExec::Exec 'cmd.exe /c schtasks /Delete /TN StealthPOSConnector /F'
 
-  ; 3) The Electron GUI / setup wizard. THIS is what locks app.asar — the cause of
-  ;    the stale-renderer bug. /T also kills its renderer/GPU child processes.
+  ; --- the Electron GUI (locks app.asar): force-kill the whole tree, no USERNAME filter, retried ---
   nsExec::Exec 'cmd.exe /c taskkill /F /T /IM "StealthPOS Connector.exe"'
+  Sleep 1200
+  nsExec::Exec 'cmd.exe /c taskkill /F /IM "StealthPOS Connector.exe"'
+  Sleep 800
 
-  ; 4) Give Windows a moment to release the file handles before we overwrite files.
-  Sleep 1500
+  nsExec::Exec 'cmd.exe /c echo [stealth install hook done] >> "C:\stealthpos-hook.log"'
 !macroend
 
-; Runs at the very start of the installer's .onInit — BEFORE the old version's
-; uninstaller (and its app-running check) is invoked, so that check passes silently.
+; Runs in the installer .onInit, BEFORE the install section's app-running check.
 !macro customInit
   !insertmacro stealthCloseRunning
 !macroend
 
-; Make the Windows "Uninstall" path tidy too: stop the service/task before files go.
+; Keep the Windows "Uninstall" path tidy too.
 !macro customUnInit
   !insertmacro stealthCloseRunning
 !macroend
