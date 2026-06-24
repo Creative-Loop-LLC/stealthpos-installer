@@ -45,14 +45,26 @@ jobs:
           Copy-Item -Path $nodeExe.FullName -Destination "resources\node.exe" -Force
           Write-Host "Bundled node.exe: $($nodeExe.FullName)"
 
-      # Sign the installer if a certificate is configured.
-      # Set WIN_CSC_LINK (base64 .pfx) and WIN_CSC_KEY_PASSWORD in repo secrets.
+      # Sign the installer ONLY if a certificate is configured. Until the cert
+      # is approved, WIN_CSC_LINK is empty — and electron-builder errors on an
+      # empty cert path instead of building unsigned, so we clear the empty vars
+      # first. Once WIN_CSC_LINK + WIN_CSC_KEY_PASSWORD secrets are set, the next
+      # build signs automatically with no other change.
       - name: Build & publish
+        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
           WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
-        run: npm run build -- --publish always
+        run: |
+          if (-not $env:WIN_CSC_LINK) {
+            Remove-Item Env:WIN_CSC_LINK -ErrorAction SilentlyContinue
+            Remove-Item Env:WIN_CSC_KEY_PASSWORD -ErrorAction SilentlyContinue
+            Write-Host "No code-signing cert configured yet — building UNSIGNED."
+          } else {
+            Write-Host "Code-signing cert found — building SIGNED."
+          }
+          npm run build -- --publish always
 
       - name: Rename stable download asset
         shell: pwsh
