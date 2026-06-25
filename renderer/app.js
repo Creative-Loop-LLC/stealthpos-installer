@@ -568,12 +568,55 @@ async function startInstall() {
     cloudUrl: "https://stealthpos.net",
   });
   if (res.ok) {
-    document.getElementById("doneStoreName").textContent = state.storeName || "Your store";
+    const storeName = state.storeName || "Your store";
+    document.getElementById("doneStoreName").textContent = storeName;
+    const check  = document.getElementById("doneCheck");
+    const title  = document.getElementById("doneTitle");
+    const rest   = document.getElementById("doneSubRest");
+    const note   = document.getElementById("doneNote");
+    const rescan = document.getElementById("doneRescan");
+    note.hidden = true;
+    rescan.hidden = true;
+
+    if (res.flowing) {
+      // Confirmed: a real file uploaded. Only here do we say data is flowing.
+      check.textContent = "✓";
+      title.textContent = "You're connected — data is flowing!";
+      rest.textContent = "is linked and your POS data is uploading to StealthPOS automatically. You can close this window.";
+    } else if (res.noFiles) {
+      // Connected, but the watched folder has no POS files — the truth, not a
+      // green check. Offer to pick a different folder.
+      check.textContent = "!";
+      title.textContent = "Connected — but no data yet";
+      rest.textContent = "is linked, but no POS files were found in the folder we're watching.";
+      note.hidden = false;
+      note.textContent =
+        `Watching: ${res.watchDir || state.watchDir || "(folder)"} — if this store already has today's sales, ` +
+        `the folder is likely wrong. Choose the correct folder, and make sure “POS Journal” export is turned ON in Passport Back Office.`;
+      rescan.hidden = false;
+    } else {
+      // Connected; files found and uploading, or none have arrived yet.
+      check.textContent = "✓";
+      title.textContent = "You're connected!";
+      rest.textContent = res.pending
+        ? "is linked. POS files were found and are uploading now — please verify on your dashboard in a few minutes."
+        : "is linked. Data uploads automatically as POS files arrive.";
+    }
     setTimeout(() => showScreen("done"), 900);
   } else {
     appendLog("");
     appendLog("Installation did not complete. Please contact StealthPOS support.");
   }
+}
+
+// "Choose a different folder" from the done screen → back to detection so a
+// wrong/empty folder can be corrected and re-installed.
+const doneRescanBtn = document.getElementById("doneRescan");
+if (doneRescanBtn) {
+  doneRescanBtn.addEventListener("click", () => {
+    installStarted = false; // allow startInstall() to run again after re-pick
+    showScreen("folder");
+  });
 }
 
 // ---------------------------------------------------------------------------

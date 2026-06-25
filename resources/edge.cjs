@@ -191,7 +191,10 @@ async function sendHeartbeat() {
         storeId: config.storeId,
         mode: config.mode,
         watchDir: config.watchDir,
-        version: 3,
+        version: 4,
+        // Folder census so the cloud can distinguish "connected" from "actually
+        // has data to send". Unknown fields are ignored by older backends.
+        census,
         ts: new Date().toISOString(),
       }),
     });
@@ -278,6 +281,12 @@ async function handleNewOwner(absPath) {
 // polling is dumb but works everywhere).
 // ------------------------------------------------------------------------- //
 const lastSeenMtime = new Map();
+// Folder census — the honest "is there anything to send?" answer. Reported once
+// on the first scan (so the installer & connector.log never imply data is
+// flowing when the folder is empty/wrong) and shipped on every heartbeat so the
+// cloud can surface "connected, but folder empty".
+let firstScanReported = false;
+let census = { xmlFiles: 0, newestFile: null, newestMtimeMs: 0, checkedAt: null };
 
 async function pollWatchDir() {
   let entries;
@@ -285,11 +294,20 @@ async function pollWatchDir() {
     entries = await fs.readdir(config.watchDir);
   } catch (err) {
     log("readdir failed", { err: String(err && err.message ? err.message : err) });
+    if (!firstScanReported) {
+      firstScanReported = true;
+      log("WATCH FOLDER UNREADABLE — connected to the cloud, but cannot read the POS folder", {
+        watchDir: config.watchDir,
+      });
+    }
     return;
   }
-  for (const name of entries) {
-    if (name.startsWith(".")) continue;
-    if (!name.toLowerCase().endsWith(config.glob)) continue;
+  const xmlNames = entries.filter(
+    (n) => !n.startsWith(".") && n.toLowerCase().endsWith(config.glob),
+  );
+  let newestMtimeMs = 0;
+  let newestFile = null;
+  for (const name of xmlNames) {
     const full = path.join(config.watchDir, name);
     let st;
     try {
@@ -298,6 +316,10 @@ async function pollWatchDir() {
       continue;
     }
     if (!st.isFile()) continue;
+    if (st.mtimeMs > newestMtimeMs) {
+      newestMtimeMs = st.mtimeMs;
+      newestFile = name;
+    }
     // Skip very recently modified files (< 2 sec); Passport may still be writing.
     if (Date.now() - st.mtimeMs < config.minAgeMs) continue;
     const prev = lastSeenMtime.get(name);
@@ -309,6 +331,29 @@ async function pollWatchDir() {
       await handleNewOwner(full);
     } else {
       await handleNewMirror(full);
+    }
+  }
+  census = { xmlFiles: xmlNames.length, newestFile, newestMtimeMs, checkedAt: Date.now() };
+  if (!firstScanReported) {
+    firstScanReported = true;
+    if (xmlNames.length === 0) {
+      // The single most common "connector connects but no data" cause: the
+      // watch folder has no POS files. Say it plainly so it is never mistaken
+      // for working — the installer keys its honest verdict off this line.
+      log("WATCH FOLDER HAS NO POS FILES — connected, but there is nothing to upload yet", {
+        watchDir: config.watchDir,
+        xmlFiles: 0,
+      });
+    } else {
+      const ageMin = newestMtimeMs
+        ? Math.round((Date.now() - newestMtimeMs) / 60000)
+        : null;
+      log("watch folder scan", {
+        watchDir: config.watchDir,
+        xmlFiles: xmlNames.length,
+        newestFile,
+        newestAgeMinutes: ageMin,
+      });
     }
   }
 }

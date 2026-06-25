@@ -505,13 +505,19 @@ ipcMain.handle("install-edge", async (event, opts) => {
     }
     send(6, "done", "Connector installed and started.");
 
-    // --- Step 7: confirm it can READ the folder and is flowing -----------
-    send(7, "running", "Confirming the connector can read your POS folder…");
+    // --- Step 7: confirm CONNECTED, and separately whether data is FLOWING.
+    // "Started" is not "flowing": the connector heartbeats (→ shows Connected)
+    // regardless of whether its watch folder has any POS files. We only claim
+    // data is flowing when a file actually UPLOADS, and we tell the truth
+    // otherwise — so a wrong/empty folder can never again look like success.
+    send(7, "running", "Confirming the connector can read your POS folder and send data…");
     const logPath = runMode === "logon-task" ? taskLogPath() : STDOUT_LOG;
-    const deadline = Date.now() + 35000;
+    const deadline = Date.now() + 40000;
     let cursor = 0;
-    let connected = false;
     let permError = false;
+    let uploads = 0;
+    let noFiles = false;
+    let hasFiles = false;
 
     while (Date.now() < deadline) {
       await sleep(1000);
@@ -523,14 +529,18 @@ ipcMain.handle("install-edge", async (event, opts) => {
           for (const line of fresh) send(7, "running", line);
           cursor = content.length;
         }
-        if (/EPERM|operation not permitted|readdir failed/i.test(content)) {
+        if (/EPERM|operation not permitted|WATCH FOLDER UNREADABLE|readdir failed/i.test(content)) {
           permError = true;
           break;
         }
-        if (/uploaded|Connector starting/i.test(content)) {
-          connected = true;
-          break;
-        }
+        // Count REAL uploads only (the connector logs "] uploaded {…}"; never
+        // match "upload failed").
+        const m = content.match(/\]\s+uploaded\s/g);
+        uploads = m ? m.length : 0;
+        if (/WATCH FOLDER HAS NO POS FILES/i.test(content)) noFiles = true;
+        if (/watch folder scan/i.test(content)) hasFiles = true;
+        // Stop as soon as we have a definitive answer.
+        if (uploads > 0 || noFiles) break;
       } catch {
         /* log not ready yet */
       }
@@ -540,17 +550,32 @@ ipcMain.handle("install-edge", async (event, opts) => {
       // The run context can't read the share — the classic LocalSystem-on-a-
       // network-share case. Tell the user how to fix it (provide Windows creds).
       send(7, "error",
-        "The connector started but can't read your network folder with the current account. " +
-        "Re-run setup and enter your Windows username + password on the network-folder step so it can run as you."
+        "The connector is running but can't READ your POS folder with the current account. " +
+        "Re-run setup and enter your Windows username + password on the network-folder step so it can read the share as you."
       );
-      return { ok: false, runMode, permError: true };
+      return { ok: false, runMode, permError: true, watchDir };
     }
-    if (connected) {
-      send(7, "done", "Connected — your store data is flowing to StealthPOS.");
-    } else {
-      send(7, "done", "Connector is running. Data will upload automatically as POS files arrive.");
+    if (uploads > 0) {
+      send(7, "done",
+        `Connected — your store data is flowing to StealthPOS (${uploads} file${uploads === 1 ? "" : "s"} uploaded).`);
+      return { ok: true, runMode, flowing: true, filesUploaded: uploads, watchDir };
     }
-    return { ok: true, runMode };
+    if (noFiles) {
+      // Connected, but the folder we're watching has no POS files. This is the
+      // #1 "connector connects but no data" cause — say it, don't hide it.
+      send(7, "done",
+        `Connected to StealthPOS — but no POS files were found in:\n${watchDir}\n` +
+        `• If the store simply hasn't rung any sales yet, data appears automatically.\n` +
+        `• If it should already have today's sales, this folder is likely wrong — go back and "Choose a different folder", and make sure "POS Journal" export is turned ON in Passport Back Office.`);
+      return { ok: true, runMode, flowing: false, noFiles: true, watchDir };
+    }
+    // Connector running and the folder HAS files, but nothing uploaded inside
+    // the window yet (large first-run backlog, or everything was already sent).
+    // Connected — verify on the dashboard rather than over-claiming here.
+    send(7, "done", hasFiles
+      ? "Connected — POS files found and uploading now. The first run can take a few minutes; please verify on your dashboard shortly."
+      : "Connector is running and connected. Data will upload automatically as POS files arrive.");
+    return { ok: true, runMode, flowing: false, pending: hasFiles, watchDir };
   } catch (err) {
     send(0, "error", err.message || String(err));
     return { ok: false, message: err.message || String(err) };

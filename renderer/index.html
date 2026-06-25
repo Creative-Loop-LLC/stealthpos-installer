@@ -302,15 +302,17 @@
       <!-- 8. Done -->
       <section class="screen" data-screen="done">
         <div class="hero">
-          <div class="done-check">✓</div>
-          <h1>You're connected!</h1>
-          <p class="sub">
-            <strong id="doneStoreName">Your store</strong> is now linked to StealthPOS.
-            Data uploads automatically in the background — you can close this window.
+          <div class="done-check" id="doneCheck">✓</div>
+          <h1 id="doneTitle">You're connected!</h1>
+          <p class="sub" id="doneSub">
+            <strong id="doneStoreName">Your store</strong>
+            <span id="doneSubRest">is now linked to StealthPOS. Data uploads automatically in the background — you can close this window.</span>
           </p>
+          <div class="inline-error" id="doneNote" hidden></div>
         </div>
         <div class="actions">
           <button class="btn btn-primary" id="openDashboard">Open Dashboard</button>
+          <button class="btn btn-secondary" id="doneRescan" hidden>Choose a different folder</button>
         </div>
       </section>
 
