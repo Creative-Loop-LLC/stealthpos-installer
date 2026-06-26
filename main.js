@@ -401,14 +401,23 @@ function removeLogonTask() {
 function installLogonTask(nodePath, env) {
   nssmQuiet(["stop", SERVICE_NAME]);
   nssmQuiet(["remove", SERVICE_NAME, "confirm"]);
+  // CRITICAL: emit PowerShell SINGLE-quoted literals, NOT JSON.stringify.
+  // JSON.stringify escapes backslashes (\ -> \\), but a PowerShell *double*-quoted
+  // string does NOT unescape them — so a UNC watch dir like
+  // \\192.168.3.194\XMLGateway\Processed was written as "\\\\192.168.3.194\\..."
+  // and reached the Edge as \\\\...\\..., which path.resolve() mangled into the
+  // bogus local path C:\192.168.3.194\... -> readdir ENOENT -> connector "connected"
+  // but silently synced nothing. PowerShell single-quotes are fully literal
+  // (only ' needs doubling), so backslashes/UNC paths survive intact.
+  const psq = (s) => `'${String(s).replace(/'/g, "''")}'`;
   const launcher = [
     '$ErrorActionPreference="Continue"',
     ...envKeys(env).map((kv) => {
       const i = kv.indexOf("=");
-      return `$env:${kv.slice(0, i)}=${JSON.stringify(kv.slice(i + 1))}`;
+      return `$env:${kv.slice(0, i)}=${psq(kv.slice(i + 1))}`;
     }),
     '$l=Join-Path $env:LOCALAPPDATA "StealthPOS"; New-Item -ItemType Directory -Force $l | Out-Null',
-    `& ${JSON.stringify(nodePath)} ${JSON.stringify(EDGE_PATH)} *>> (Join-Path $l "connector.log")`,
+    `& ${psq(nodePath)} ${psq(EDGE_PATH)} *>> (Join-Path $l "connector.log")`,
   ].join("\r\n");
   fs.writeFileSync(LAUNCHER_PATH, launcher, "utf8");
   const setup = [
