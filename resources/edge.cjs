@@ -80,6 +80,12 @@ config.seenDb = process.env.BOS_SEEN_DB
   : path.join(DATA_DIR, "seen.log");
 // The SMB/file-watch path only runs when a watch dir is configured.
 config.watchEnabled = !!config.watchDir;
+// Partial-write guard: with minAgeMs=0 (grab instantly to beat another
+// consumer's delete) we can catch a half-written file. Re-read the source up to
+// completeRetries times until the XML parses as complete (Passport finishes
+// writing within milliseconds), so we never upload a truncated 0-row file.
+config.completeRetries = parseInt(process.env.BOS_COMPLETE_RETRIES || "6", 10);
+config.completeDelayMs = parseInt(process.env.BOS_COMPLETE_DELAY_MS || "120", 10);
 
 if (!["owner", "mirror"].includes(config.mode)) {
   console.error(`BOS_MODE must be "owner" or "mirror" (got "${config.mode}")`);
@@ -136,6 +142,27 @@ async function ensureDir(p) {
   } catch (e) {
     /* ignore — exists or unreachable */
   }
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Heuristic XML-completeness check (zero-dep). A NAXML doc ends with its root
+// close tag; a truncated/half-written file won't. Lets us detect a partial grab
+// and re-read before uploading, so we don't ship 0-row "errors" that under-count
+// sales vs the POS.
+function isCompleteXml(buf) {
+  if (!buf || buf.length < 16) return false;
+  let s = buf.toString("utf8").replace(/^\uFEFF/, "").trim();
+  if (!s.startsWith("<")) return false;
+  // First real element name — skips <?xml ...?> and <!-- --> because ? and !
+  // are not valid XML name-start characters.
+  const m = s.match(/<([A-Za-z_][\w.:-]*)/);
+  if (!m) return false;
+  const root = m[1].replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return (
+    new RegExp("</" + root + "\\s*>\\s*$").test(s) ||
+    new RegExp("<" + root + "\\b[^>]*/>\\s*$").test(s)
+  );
 }
 
 // ------------------------------------------------------------------------- //
@@ -267,18 +294,45 @@ async function handleNewMirror(absPath) {
   const key = seenKey(fileName, st.mtimeMs);
   if (seenMirror.has(key)) return;
 
-  // Grab our own copy FAST, then mark it captured. The UPLOAD happens
-  // asynchronously via retryOutbox — so the capture loop never waits on the
-  // network. That's what wins the race when another consumer (Modisoft) is
-  // also collecting from this folder and deletes files seconds later.
-  // fs.copyFile opens the source shared (read/delete), so we can never block
-  // that other consumer's own collection.
+  // Read our own copy FAST (to win the race vs a consumer that deletes files
+  // seconds after Passport writes them). But with minAgeMs=0 we can catch a
+  // half-written file, so re-read the source until the XML is COMPLETE (Passport
+  // finishes within ms) or the source disappears. This recovers the partial
+  // grabs that otherwise upload as 0-row "errors" and under-count sales.
+  let buf = null;
+  let complete = false;
+  for (let attempt = 0; attempt < config.completeRetries; attempt++) {
+    try {
+      buf = await fs.readFile(absPath);
+    } catch {
+      // Source collected by the other consumer mid-read — stop, use last read.
+      break;
+    }
+    if (isCompleteXml(buf)) {
+      complete = true;
+      break;
+    }
+    await sleep(config.completeDelayMs);
+  }
+  if (!buf) {
+    log("read skipped (file gone before first read)", { file: fileName });
+    return;
+  }
+  if (!complete) {
+    // Still truncated after retries (source likely deleted mid-write). Don't
+    // upload a partial (it 0-row errors) and DON'T mark seen, so a later poll
+    // can retry if the file still exists.
+    log("skipped truncated file (will retry)", { file: fileName, bytes: buf.length });
+    return;
+  }
+
+  // Stage the complete copy; retryOutbox uploads it async so the capture loop
+  // never blocks on the network.
   const outboxPath = path.join(config.outboxDir, `${Date.now()}_${fileName}`);
   try {
-    await fs.copyFile(absPath, outboxPath);
+    await fs.writeFile(outboxPath, buf);
   } catch (err) {
-    // Source may have been collected by the other consumer mid-copy — fine.
-    log("copy skipped (file gone/busy)", {
+    log("stage to outbox failed; will retry", {
       file: fileName,
       err: String(err && err.message ? err.message : err),
     });
@@ -795,4 +849,4 @@ if (require.main === module) {
 }
 
 // Exported for tests (no-op when run directly as the connector).
-module.exports = { FtpClient, ftpConfig };
+module.exports = { FtpClient, ftpConfig, isCompleteXml };
