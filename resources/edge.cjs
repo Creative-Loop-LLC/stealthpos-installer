@@ -18,6 +18,19 @@
  *   BOS_GLOB         file pattern (suffix match), default ".xml"
  *   BOS_OUTBOX_DIR   default $BOS_WATCH_DIR/.outbox
  *   BOS_SEEN_DB      default $BOS_WATCH_DIR/.bos-seen.log
+ *
+ *   --- FTP-pull mode (optional) — pull NAXML straight off the POS FTP server,
+ *       exactly the way Modisoft does, so no mounted SMB share is needed ---
+ *   BOS_FTP_HOST     enables FTP-pull when set (e.g. 192.168.3.194)
+ *   BOS_FTP_PORT     default 21
+ *   BOS_FTP_USER     e.g. BackOffice
+ *   BOS_FTP_PASS     password
+ *   BOS_FTP_TLS      "1" for explicit FTPS (AUTH TLS + PROT P)
+ *   BOS_FTP_DIRS     comma-separated remote dirs to scan (default ".")
+ *   BOS_FTP_POLL_MS  default 15000
+ *   When BOS_FTP_HOST is set, BOS_WATCH_DIR becomes optional (FTP-only client).
+ *   FTP-pull is READ-ONLY: it never deletes server files, so it coexists with
+ *   Modisoft (both pull; the cloud dedups any file pulled twice).
  */
 const fs = require("fs/promises");
 const fsSync = require("fs");
@@ -33,11 +46,19 @@ function required(name) {
   return v;
 }
 
+// BOS_WATCH_DIR drives the file-watch (SMB) path. It is REQUIRED normally, but
+// OPTIONAL when FTP-pull mode is on (BOS_FTP_HOST) — an FTP-only client has no
+// mounted share to watch.
+const ftpHostEnv = (process.env.BOS_FTP_HOST || "").trim();
+const watchDirEnv = ftpHostEnv
+  ? (process.env.BOS_WATCH_DIR || "").trim()
+  : required("BOS_WATCH_DIR");
+
 const config = {
   secret: required("BOS_EDGE_SECRET"),
   storeId: parseInt(required("BOS_STORE_ID"), 10),
   cloudUrl: required("BOS_CLOUD_URL").replace(/\/+$/, ""),
-  watchDir: path.resolve(required("BOS_WATCH_DIR")),
+  watchDir: watchDirEnv ? path.resolve(watchDirEnv) : "",
   mode: process.env.BOS_MODE || "mirror",
   pollMs: parseInt(process.env.BOS_POLL_MS || "5000", 10),
   retryMs: parseInt(process.env.BOS_RETRY_MS || "30000", 10),
@@ -57,6 +78,8 @@ config.outboxDir = process.env.BOS_OUTBOX_DIR
 config.seenDb = process.env.BOS_SEEN_DB
   ? path.resolve(process.env.BOS_SEEN_DB)
   : path.join(DATA_DIR, "seen.log");
+// The SMB/file-watch path only runs when a watch dir is configured.
+config.watchEnabled = !!config.watchDir;
 
 if (!["owner", "mirror"].includes(config.mode)) {
   console.error(`BOS_MODE must be "owner" or "mirror" (got "${config.mode}")`);
@@ -70,7 +93,7 @@ if (!Number.isFinite(config.storeId) || config.storeId < 1) {
 // SAFETY (mirror mode = running side-by-side with Modisoft): never write inside
 // the shared watch dir. If the outbox/seen paths resolve under it, refuse to
 // start so we can't disturb the POS share or another consumer's files.
-if (config.mode === "mirror") {
+if (config.mode === "mirror" && config.watchEnabled) {
   const inside = (p) =>
     p === config.watchDir || p.startsWith(config.watchDir + path.sep);
   if (inside(config.outboxDir) || inside(config.seenDb)) {
@@ -85,7 +108,7 @@ if (config.mode === "mirror") {
 
 // Owner mode MOVES files out of the watch dir — never run it against a network
 // share another app (Modisoft) owns, or we'd starve their consumer.
-if (config.mode === "owner") {
+if (config.mode === "owner" && config.watchEnabled) {
   const isUnc = /^(\\\\|\/\/)/.test(process.env.BOS_WATCH_DIR || "");
   if (isUnc && process.env.BOS_ALLOW_OWNER_ON_SHARE !== "1") {
     console.error(
@@ -143,9 +166,7 @@ async function recordSeen(key) {
 // ------------------------------------------------------------------------- //
 // Upload
 // ------------------------------------------------------------------------- //
-async function uploadFile(absPath) {
-  const buf = await fs.readFile(absPath);
-  const fileName = path.basename(absPath);
+async function uploadBuffer(fileName, buf) {
   const body = JSON.stringify({
     storeId: config.storeId,
     fileName,
@@ -172,6 +193,11 @@ async function uploadFile(absPath) {
     );
   }
   return parsed;
+}
+
+async function uploadFile(absPath) {
+  const buf = await fs.readFile(absPath);
+  return uploadBuffer(path.basename(absPath), buf);
 }
 
 // ------------------------------------------------------------------------- //
@@ -378,6 +404,324 @@ async function retryOutbox() {
   }
 }
 
+// ------------------------------------------------------------------------- //
+// FTP-pull mode (optional) — pull NAXML files straight off the POS's FTP
+// server, exactly the way Modisoft does. Enabled by setting BOS_FTP_HOST.
+//
+// Zero-dependency: a minimal FTP client over Node's net/tls. Passive mode.
+// Supports plain FTP and explicit FTPS (AUTH TLS / PROT P) via BOS_FTP_TLS=1.
+// READ-ONLY: never deletes anything on the server, so Modisoft and this Edge
+// can both pull from the same gateway (the cloud dedups any double-pull).
+// ------------------------------------------------------------------------- //
+const net = require("net");
+const tls = require("tls");
+
+const ftpConfig = {
+  host: ftpHostEnv,
+  port: parseInt(process.env.BOS_FTP_PORT || "21", 10),
+  user: process.env.BOS_FTP_USER || "anonymous",
+  pass: process.env.BOS_FTP_PASS || "",
+  tls: process.env.BOS_FTP_TLS === "1",
+  dirs: (process.env.BOS_FTP_DIRS || ".")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
+  pollMs: parseInt(process.env.BOS_FTP_POLL_MS || "15000", 10),
+};
+const ftpEnabled = !!ftpConfig.host;
+
+// A small Promise-based FTP client. Responses and commands are matched FIFO;
+// responses that arrive before a waiter is registered are buffered, so the
+// 150-then-226 sequence of a transfer never races.
+class FtpClient {
+  constructor(cfg) {
+    this.cfg = cfg;
+    this.ctrl = null;
+    this.buf = "";
+    this.waiters = [];
+    this.responses = [];
+    this.closed = false;
+  }
+  _attach(sock) {
+    sock.setEncoding("latin1");
+    sock.on("data", (chunk) => {
+      this.buf += chunk;
+      this._drain();
+    });
+    sock.on("error", (e) => this._failAll(e));
+    sock.on("close", () => {
+      if (!this.closed) this._failAll(new Error("control socket closed"));
+    });
+  }
+  _failAll(err) {
+    const ws = this.waiters.splice(0);
+    for (const w of ws) w.reject(err);
+  }
+  _codeOf(chunk) {
+    const lines = chunk.split("\r\n").filter((l) => l.length);
+    const last = lines[lines.length - 1] || "";
+    return parseInt(last.slice(0, 3), 10);
+  }
+  _findResponseEnd(buf) {
+    const i = buf.indexOf("\r\n");
+    if (i < 0) return -1;
+    const first = buf.slice(0, i);
+    const m = /^(\d{3})([ -])/.exec(first);
+    if (!m) return i + 2; // not a response line — skip to resync
+    if (m[2] === " ") return i + 2; // single-line response
+    const code = m[1];
+    const lines = buf.split("\r\n");
+    let pos = 0;
+    for (let k = 0; k < lines.length - 1; k++) {
+      const line = lines[k];
+      if (line.startsWith(code + " ")) return pos + line.length + 2;
+      pos += line.length + 2;
+    }
+    return -1; // multi-line not finished yet
+  }
+  _drain() {
+    for (;;) {
+      const end = this._findResponseEnd(this.buf);
+      if (end < 0) return;
+      const chunk = this.buf.slice(0, end);
+      this.buf = this.buf.slice(end);
+      const resp = { code: this._codeOf(chunk), text: chunk };
+      const w = this.waiters.shift();
+      if (w) w.resolve(resp);
+      else this.responses.push(resp);
+    }
+  }
+  _next() {
+    if (this.responses.length) return Promise.resolve(this.responses.shift());
+    return new Promise((resolve, reject) => this.waiters.push({ resolve, reject }));
+  }
+  async _send(cmd) {
+    this.ctrl.write(cmd + "\r\n");
+    return this._next();
+  }
+  async _expect(cmd, okCodes) {
+    const r = await this._send(cmd);
+    if (okCodes && !okCodes.includes(r.code)) {
+      throw new Error(`FTP ${cmd.split(" ")[0]} -> ${r.code}: ${r.text.trim()}`);
+    }
+    return r;
+  }
+  _startTls(sock) {
+    return new Promise((resolve, reject) => {
+      sock.removeAllListeners("data");
+      sock.removeAllListeners("close");
+      sock.removeAllListeners("error");
+      const sec = tls.connect(
+        { socket: sock, servername: this.cfg.host, rejectUnauthorized: false },
+        () => {
+          // Capture the control session so PROT-P data channels can RESUME it.
+          // Many FTPS servers require the data TLS session to match the control
+          // session and will hand back an empty/refused data channel otherwise.
+          this.tlsSession = sec.getSession();
+          this._attach(sec);
+          resolve(sec);
+        },
+      );
+      sec.on("session", (s) => {
+        this.tlsSession = s;
+      });
+      sec.once("error", reject);
+    });
+  }
+  async connect() {
+    await new Promise((resolve, reject) => {
+      this.ctrl = net.connect(this.cfg.port, this.cfg.host, resolve);
+      this.ctrl.once("error", reject);
+    });
+    this._attach(this.ctrl);
+    await this._next(); // 220 banner (unsolicited)
+    if (this.cfg.tls) {
+      const r = await this._send("AUTH TLS");
+      if (r.code !== 234 && r.code !== 334) {
+        throw new Error(`AUTH TLS -> ${r.code}: ${r.text.trim()}`);
+      }
+      this.ctrl = await this._startTls(this.ctrl);
+    }
+    await this._expect(`USER ${this.cfg.user}`, [331, 230]);
+    if (this.cfg.pass) await this._expect(`PASS ${this.cfg.pass}`, [230, 202]);
+    if (this.cfg.tls) {
+      await this._send("PBSZ 0");
+      await this._send("PROT P");
+    }
+    await this._expect("TYPE I", [200]);
+  }
+  _parsePasv(text) {
+    const m = /(\d+),(\d+),(\d+),(\d+),(\d+),(\d+)/.exec(text);
+    if (!m) throw new Error(`bad PASV reply: ${text.trim()}`);
+    // Reuse the control host (robust against a NAT/LAN address in the reply).
+    return { port: (parseInt(m[5], 10) << 8) + parseInt(m[6], 10) };
+  }
+  async _openData() {
+    const pasv = await this._expect("PASV", [227]);
+    const { port } = this._parsePasv(pasv.text);
+    let data = await new Promise((resolve, reject) => {
+      const s = net.connect(port, this.cfg.host, () => resolve(s));
+      s.once("error", reject);
+    });
+    if (this.cfg.tls) {
+      data = await new Promise((resolve, reject) => {
+        const s = tls.connect(
+          {
+            socket: data,
+            servername: this.cfg.host,
+            rejectUnauthorized: false,
+            session: this.tlsSession, // resume the control session (FTPS req.)
+          },
+          () => resolve(s),
+        );
+        s.once("error", reject);
+      });
+    }
+    return data;
+  }
+  async list(dir) {
+    const data = await this._openData();
+    const chunks = [];
+    const done = new Promise((resolve, reject) => {
+      data.on("data", (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c, "latin1")));
+      data.on("end", resolve);
+      data.on("close", resolve);
+      data.on("error", reject);
+    });
+    const cmd = dir && dir !== "." ? `NLST ${dir}` : "NLST";
+    const pre = await this._send(cmd);
+    if (pre.code >= 400) {
+      data.destroy();
+      if (pre.code === 450 || pre.code === 550) return []; // empty/no such dir
+      throw new Error(`${cmd} -> ${pre.code}: ${pre.text.trim()}`);
+    }
+    await done;
+    await this._next(); // 226 transfer complete
+    return Buffer.concat(chunks)
+      .toString("latin1")
+      .split(/\r?\n/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((s) => s.split("/").pop()); // bare filename even if server returns a path
+  }
+  async retr(remotePath) {
+    const data = await this._openData();
+    const chunks = [];
+    const done = new Promise((resolve, reject) => {
+      data.on("data", (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c, "latin1")));
+      data.on("end", resolve);
+      data.on("close", resolve);
+      data.on("error", reject);
+    });
+    const pre = await this._send(`RETR ${remotePath}`);
+    if (pre.code >= 400) {
+      data.destroy();
+      throw new Error(`RETR ${remotePath} -> ${pre.code}: ${pre.text.trim()}`);
+    }
+    await done;
+    await this._next(); // 226 transfer complete
+    return Buffer.concat(chunks);
+  }
+  close() {
+    this.closed = true;
+    try {
+      if (this.ctrl) this.ctrl.destroy();
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+// FTP dedupe — keyed by remote path so we don't re-upload the same file each
+// poll. Persisted to its own file; cloud dedup is the backstop on a cold start.
+const ftpSeenDb = config.seenDb + ".ftp";
+const ftpSeen = new Set();
+let ftpFirstReported = false;
+async function loadFtpSeen() {
+  try {
+    const text = await fs.readFile(ftpSeenDb, "utf-8");
+    for (const line of text.split("\n")) {
+      const t = line.trim();
+      if (t) ftpSeen.add(t);
+    }
+    log(`loaded ${ftpSeen.size} FTP-seen entries`);
+  } catch {
+    /* first run */
+  }
+}
+async function recordFtpSeen(key) {
+  ftpSeen.add(key);
+  await fs.appendFile(ftpSeenDb, key + "\n").catch(() => undefined);
+}
+
+async function ftpPullOnce() {
+  const client = new FtpClient(ftpConfig);
+  let listed = 0;
+  let pulled = 0;
+  try {
+    await client.connect();
+    for (const dir of ftpConfig.dirs) {
+      let names;
+      try {
+        names = await client.list(dir);
+      } catch (err) {
+        log("ftp list failed", { dir, err: String(err && err.message ? err.message : err) });
+        continue;
+      }
+      const xml = names.filter((n) => n.toLowerCase().endsWith(config.glob));
+      listed += xml.length;
+      for (const name of xml) {
+        const remote = dir === "." ? name : `${dir.replace(/\/+$/, "")}/${name}`;
+        if (ftpSeen.has(remote)) continue;
+        let buf;
+        try {
+          buf = await client.retr(remote);
+        } catch (err) {
+          log("ftp retr failed", { remote, err: String(err && err.message ? err.message : err) });
+          continue;
+        }
+        try {
+          const result = await uploadBuffer(name, buf);
+          await recordFtpSeen(remote);
+          pulled++;
+          log("ftp pulled+uploaded", {
+            file: name,
+            type: result.documentType,
+            rows: result.rowsWritten,
+            duplicate: result.duplicate,
+          });
+        } catch (err) {
+          // Leave it un-seen so the next poll retries the upload.
+          log("ftp upload failed; will retry", {
+            file: name,
+            err: String(err && err.message ? err.message : err),
+          });
+        }
+      }
+    }
+    // Feed the heartbeat census so the dashboard reflects FTP activity too.
+    census = {
+      xmlFiles: listed,
+      newestFile: census.newestFile,
+      newestMtimeMs: census.newestMtimeMs,
+      checkedAt: Date.now(),
+    };
+    if (!ftpFirstReported) {
+      ftpFirstReported = true;
+      if (listed === 0) {
+        log("FTP connected + logged in, but NO POS files in the configured dirs", {
+          host: ftpConfig.host,
+          dirs: ftpConfig.dirs,
+        });
+      } else {
+        log("FTP scan ok", { host: ftpConfig.host, dirs: ftpConfig.dirs, xmlFiles: listed, pulled });
+      }
+    }
+  } finally {
+    client.close();
+  }
+}
+
 async function main() {
   log("StealthPOS Connector starting", {
     mode: config.mode,
@@ -386,28 +730,53 @@ async function main() {
     cloudUrl: config.cloudUrl,
     pollMs: config.pollMs,
   });
-  // In mirror mode the watch dir is the POS's shared folder — we only READ it,
-  // never create or write anything there. Only owner mode (we own the dir) mkdirs it.
-  if (config.mode === "owner") await ensureDir(config.watchDir);
   await ensureDir(config.outboxDir);
   await ensureDir(path.dirname(config.seenDb));
-  await loadSeen();
-  await retryOutbox();
 
-  setInterval(() => {
-    pollWatchDir().catch((err) =>
-      log("poll error", { err: String(err && err.message ? err.message : err) }),
-    );
-  }, config.pollMs);
-  setInterval(() => {
-    retryOutbox().catch(() => undefined);
-  }, config.retryMs);
+  if (config.watchEnabled) {
+    // In mirror mode the watch dir is the POS's shared folder — we only READ it,
+    // never create or write anything there. Only owner mode (we own the dir) mkdirs it.
+    if (config.mode === "owner") await ensureDir(config.watchDir);
+    await loadSeen();
+    await retryOutbox();
+    setInterval(() => {
+      pollWatchDir().catch((err) =>
+        log("poll error", { err: String(err && err.message ? err.message : err) }),
+      );
+    }, config.pollMs);
+    setInterval(() => {
+      retryOutbox().catch(() => undefined);
+    }, config.retryMs);
+    pollWatchDir().catch(() => undefined);
+  }
+
+  if (ftpEnabled) {
+    log("FTP-pull mode enabled", {
+      host: ftpConfig.host,
+      port: ftpConfig.port,
+      user: ftpConfig.user,
+      tls: ftpConfig.tls,
+      dirs: ftpConfig.dirs,
+      pollMs: ftpConfig.pollMs,
+    });
+    await loadFtpSeen();
+    setInterval(() => {
+      ftpPullOnce().catch((err) =>
+        log("ftp poll error", { err: String(err && err.message ? err.message : err) }),
+      );
+    }, ftpConfig.pollMs);
+    ftpPullOnce().catch(() => undefined);
+  }
+
+  if (!config.watchEnabled && !ftpEnabled) {
+    log("NOTHING TO DO — set BOS_WATCH_DIR (file-watch) and/or BOS_FTP_HOST (FTP-pull)");
+  }
+
   setInterval(() => {
     sendHeartbeat().catch(() => undefined);
   }, config.heartbeatMs);
 
-  // Kick off an immediate first pass + heartbeat
-  pollWatchDir().catch(() => undefined);
+  // Kick off an immediate first heartbeat
   sendHeartbeat().catch(() => undefined);
 
   for (const sig of ["SIGINT", "SIGTERM"]) {
@@ -418,7 +787,12 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error("Fatal:", err);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error("Fatal:", err);
+    process.exit(1);
+  });
+}
+
+// Exported for tests (no-op when run directly as the connector).
+module.exports = { FtpClient, ftpConfig };
