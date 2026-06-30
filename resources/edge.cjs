@@ -54,20 +54,27 @@ const watchDirEnv = ftpHostEnv
   ? (process.env.BOS_WATCH_DIR || "").trim()
   : required("BOS_WATCH_DIR");
 
+// Mirror mode runs side-by-side with another consumer (Modisoft) that DELETES
+// transient sale-journal files seconds after Passport writes them, so its
+// defaults are race-safe out of the box (owner mode owns the folder and can
+// afford to wait for a complete write):
+//   • poll fast (1s) so a file rarely lives a whole gap unseen
+//   • minAge 0 so we grab the instant a file appears — the completeness guard
+//     re-reads until the XML parses, so an instant grab is still never partial
+const MODE = process.env.BOS_MODE || "mirror";
 const config = {
   secret: required("BOS_EDGE_SECRET"),
   storeId: parseInt(required("BOS_STORE_ID"), 10),
   cloudUrl: required("BOS_CLOUD_URL").replace(/\/+$/, ""),
   watchDir: watchDirEnv ? path.resolve(watchDirEnv) : "",
-  mode: process.env.BOS_MODE || "mirror",
-  pollMs: parseInt(process.env.BOS_POLL_MS || "5000", 10),
+  mode: MODE,
+  pollMs: parseInt(process.env.BOS_POLL_MS || (MODE === "mirror" ? "1000" : "5000"), 10),
   retryMs: parseInt(process.env.BOS_RETRY_MS || "30000", 10),
   glob: (process.env.BOS_GLOB || ".xml").toLowerCase(),
-  // Min file age before we grab it. Default 2s avoids reading a half-written
-  // file. Set 0 to grab the instant it appears (XMLGateway drops complete
-  // files atomically) — needed to win the race vs another consumer (Modisoft)
-  // that deletes files seconds after Passport writes them.
-  minAgeMs: parseInt(process.env.BOS_MIN_AGE_MS || "2000", 10),
+  // Min file age before we grab it. Owner mode waits 2s to avoid a half-written
+  // file; mirror mode grabs instantly (0) to beat the other consumer's delete —
+  // the completeness guard (below) re-reads until the XML is whole, so 0 is safe.
+  minAgeMs: parseInt(process.env.BOS_MIN_AGE_MS || (MODE === "mirror" ? "0" : "2000"), 10),
 };
 // Work dirs default to a LOCAL folder — never inside the watch dir — so in
 // mirror mode we never write a single byte into the shared POS folder.
@@ -145,6 +152,31 @@ async function ensureDir(p) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Run `fn` over `items` with bounded concurrency. Used so a burst of new files
+ * is grabbed near-simultaneously — a slow completeness-retry (or SMB read) on one
+ * file never holds its siblings in the shared folder long enough for the other
+ * consumer (Modisoft) to delete them out from under us. */
+async function mapLimit(items, limit, fn) {
+  const queue = items.slice();
+  const n = Math.max(1, Math.min(limit, queue.length));
+  const workers = [];
+  for (let i = 0; i < n; i++) {
+    workers.push(
+      (async () => {
+        while (queue.length) {
+          const item = queue.shift();
+          try {
+            await fn(item);
+          } catch {
+            /* per-item handlers already log their own failures */
+          }
+        }
+      })(),
+    );
+  }
+  await Promise.all(workers);
+}
 
 // Heuristic XML-completeness check (zero-dep). A NAXML doc ends with its root
 // close tag; a truncated/half-written file won't. Lets us detect a partial grab
@@ -387,31 +419,39 @@ async function pollWatchDir() {
   );
   let newestMtimeMs = 0;
   let newestFile = null;
-  for (const name of xmlNames) {
+  const toGrab = [];
+
+  // Pass 1 — stat every file CONCURRENTLY and decide which are new. SMB stat
+  // latency adds up; doing it serially lengthens the poll and the race window.
+  // (The if-blocks below run synchronously after each await, so the shared
+  // newest*/lastSeenMtime/toGrab updates never interleave — Node is single-threaded.)
+  await mapLimit(xmlNames, 8, async (name) => {
     const full = path.join(config.watchDir, name);
     let st;
     try {
       st = await fs.stat(full);
     } catch {
-      continue;
+      return;
     }
-    if (!st.isFile()) continue;
+    if (!st.isFile()) return;
     if (st.mtimeMs > newestMtimeMs) {
       newestMtimeMs = st.mtimeMs;
       newestFile = name;
     }
-    // Skip very recently modified files (< 2 sec); Passport may still be writing.
-    if (Date.now() - st.mtimeMs < config.minAgeMs) continue;
-    const prev = lastSeenMtime.get(name);
-    if (prev === st.mtimeMs) continue; // unchanged since last poll
+    // Skip files younger than minAge (owner mode only; mirror minAge defaults 0).
+    if (Date.now() - st.mtimeMs < config.minAgeMs) return;
+    if (lastSeenMtime.get(name) === st.mtimeMs) return; // unchanged since last poll
     lastSeenMtime.set(name, st.mtimeMs);
+    toGrab.push(full);
+  });
 
-    log("file detected", { file: name, mode: config.mode });
-    if (config.mode === "owner") {
-      await handleNewOwner(full);
-    } else {
-      await handleNewMirror(full);
-    }
+  // Pass 2 — grab all new files CONCURRENTLY so a slow completeness-retry (or SMB
+  // read) on one file never exposes its siblings to the other consumer's deleter.
+  if (toGrab.length) {
+    log("files detected", { count: toGrab.length, mode: config.mode });
+    await mapLimit(toGrab, 8, (full) =>
+      config.mode === "owner" ? handleNewOwner(full) : handleNewMirror(full),
+    );
   }
   census = { xmlFiles: xmlNames.length, newestFile, newestMtimeMs, checkedAt: Date.now() };
   if (!firstScanReported) {
